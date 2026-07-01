@@ -57,8 +57,8 @@ pub fn finalize_payroll(psbt_path: impl AsRef<Path>) -> Result<FinalizePayrollRe
             participants.len()
         ));
     }
-    let (agg_pk, participant_pks) = participants.remove(0);
-    let path = get_input_musig2_agg_path(&psbt.inputs[0], &agg_pk);
+    let (_agg_pk, participant_pks) = participants.remove(0);
+    let path = get_input_musig2_agg_path(&psbt.inputs[0]);
     let (key_agg_ctx, _gacc) = build_tweaked_key_agg_ctx(&secp, &participant_pks, &path)?;
 
     // Aggregate the partial signatures already present in the PSBT and extract the tx.

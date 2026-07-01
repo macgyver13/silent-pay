@@ -267,6 +267,7 @@ pub fn construct_psbt(
     psbt_fields::set_input_musig2_agg_derivation(
         &mut psbt.inputs[0],
         &keys.untweaked_agg_pk,
+        keys.untweaked_agg_xonly,
         DEMO_SP_INDEX,
     );
 

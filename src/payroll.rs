@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use bip375_helpers::transaction::build_psbt;
-use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
+use bitcoin::bip32::{DerivationPath, Fingerprint};
 use bitcoin::key::{TweakedPublicKey, XOnlyPublicKey};
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxOut, Txid};
 use hmac::{Hmac, Mac};
@@ -133,16 +133,16 @@ fn derive_wallet_public_keys(
 ) -> Result<WalletPublicKeys> {
     let mut participant_pks = Vec::with_capacity(wallet.signers.len());
     let mut participant_origins = Vec::with_capacity(wallet.signers.len());
-    let child_path = signer_child_path(derivation_index);
     for signer in &wallet.signers {
+        // MuSig2 aggregates the cosigners' account-level keys (the xpub itself);
+        // the per-index child is derived synthetically from the aggregate (BIP-328),
+        // not by deriving each cosigner. This matches the Coldcard firmware's
+        // `musig(...)/change/index` model.
         let xpub = signer.xpub_value()?;
-        let child = xpub
-            .derive_pub(secp, &child_path)
-            .with_context(|| format!("failed to derive signer xpub {}", signer.xfp))?;
-        participant_pks.push(child.public_key);
+        participant_pks.push(xpub.public_key);
 
-        let (xonly, _) = child.public_key.x_only_public_key();
-        let full_path = signer.derivation_path_value()?.extend(&child_path);
+        let (xonly, _) = xpub.public_key.x_only_public_key();
+        let full_path = signer.derivation_path_value()?;
         participant_origins.push((xonly, signer.fingerprint()?, full_path));
     }
 
@@ -212,6 +212,7 @@ fn construct_initial_psbt(
     musig2_psbt::set_input_musig2_agg_derivation(
         &mut psbt.inputs[0],
         &input_keys.untweaked_agg_pk,
+        input_keys.plain_child_xonly,
         input_keys.derivation_index,
     );
     // BIP-373: per-participant TAP_BIP32_DERIVATION so each cosigner's signing
@@ -261,10 +262,6 @@ fn sp_v0_info_bytes(address: &silentpayments::SilentPaymentAddress) -> [u8; 66] 
     bytes[..33].copy_from_slice(&address.get_scan_key().serialize());
     bytes[33..].copy_from_slice(&address.get_spend_key().serialize());
     bytes
-}
-
-fn signer_child_path(index: u32) -> DerivationPath {
-    [0, index].iter().map(|&n| ChildNumber::from(n)).collect()
 }
 
 fn apply_bip328_plain_tweaks(
@@ -369,7 +366,7 @@ mod tests {
         };
 
         let result = build_initial_payroll_psbt(BuildInitialPayrollConfig::new(
-            wallet,
+            wallet.clone(),
             &recipients_path,
             prevout.clone(),
             &psbt_path,
@@ -409,9 +406,10 @@ mod tests {
         assert!(psbt.inputs[0].musig2_partial_sigs.is_empty());
         assert!(psbt.inputs[0].unknowns.is_empty());
 
-        // Input carries one TAP_BIP32_DERIVATION per MuSig2 participant (full path
-        // account + /0/index) plus one for the aggregate key ([0, index]). No
-        // BIP-376 SP-spend derivation is present (this input is not an SP output).
+        // Input carries one TAP_BIP32_DERIVATION per MuSig2 participant at the
+        // account-level path (the aggregated key), plus one for the synthetic
+        // aggregate child ([0, index]). No BIP-376 SP-spend derivation is present
+        // (this input is not an SP output).
         let input_origins = &psbt.inputs[0].tap_key_origins;
         assert_eq!(input_origins.len(), 3);
         let signer_fps = HashSet::from([
@@ -425,17 +423,30 @@ mod tests {
             if signer_fps.contains(fp) {
                 assert_eq!(
                     *path,
-                    DerivationPath::from_str("m/48h/1h/0h/3h/0/0").expect("path")
+                    DerivationPath::from_str("m/48h/1h/0h/3h").expect("path")
                 );
             }
         }
-        // The aggregate entry carries the bare [0, input_index] MuSig2 child path.
-        assert!(input_origins.values().any(|(_, (_, path))| *path
-            == DerivationPath::from_str("m/0/0").expect("path")));
+        // The aggregate entry carries the bare [0, input_index] MuSig2 child path
+        // and is keyed by the taproot internal key (the derived aggregate), with
+        // the synthetic root fingerprint hash160(untweaked_agg_pk)[..4].
+        let secp = Secp256k1::new();
+        let input_keys =
+            derive_wallet_public_keys(&secp, &wallet.normalized().expect("wallet"), 0)
+                .expect("keys");
+        let internal_key = psbt.inputs[0].tap_internal_key.expect("internal key");
+        assert_eq!(internal_key, input_keys.plain_child_xonly);
+        let (_, (agg_fp, agg_path)) = input_origins.get(&internal_key).expect("aggregate origin");
+        assert_eq!(*agg_path, DerivationPath::from_str("m/0/0").expect("path"));
+        assert_eq!(
+            *agg_fp,
+            crate::musig2_psbt::musig2_agg_fingerprint(&input_keys.untweaked_agg_pk)
+        );
         assert!(psbt.inputs[0].sp_spend_bip32_derivations.is_empty());
 
         // Change output carries the same per-participant derivations at the
-        // change index (/0/1).
+        // account-level path (the per-index child is derived synthetically from
+        // the aggregate, not per participant).
         let change_origins = &psbt
             .outputs
             .iter()
@@ -446,7 +457,7 @@ mod tests {
         for (_, (_, path)) in change_origins.values() {
             assert_eq!(
                 *path,
-                DerivationPath::from_str("m/48h/1h/0h/3h/0/1").expect("path")
+                DerivationPath::from_str("m/48h/1h/0h/3h").expect("path")
             );
         }
     }
