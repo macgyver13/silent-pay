@@ -1,23 +1,20 @@
 use anyhow::{bail, Context, Result};
-use bip375_helpers::crypto::tweaked_key_to_p2tr_script;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
 use bitcoin::key::XOnlyPublicKey;
 use bitcoin::{Amount, Txid};
 use psbt::roles::signer::extract_eligible_input_pubkey;
 use psbt::Psbt as SilentPaymentPsbt;
-use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
+use secp256k1::{PublicKey, Secp256k1};
 use silentpayments::receiving::{Label, Receiver};
 use silentpayments::utils::receiving::PublicTweakData;
 use silentpayments::utils::OutPoint as SpOutPoint;
 use silentpayments::{Network, SpVersion, TransactionInputs, TransactionSharedSecret};
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::musig2_psbt::{get_output_sp_info, input_outpoint_bytes};
-use crate::musig2_spdk::finalizer::{derive_silent_payment_output_pubkey, input_hash_bytes};
+use crate::demo::workflow::{self, KeySetup};
+use crate::musig2_psbt::get_output_sp_info;
 use crate::recipients::{address_amounts, load_recipients, recipient_keys};
-use crate::workflow::{self, KeySetup};
 
 const FIXTURE_PREV_TXID_HEX: &str =
     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
@@ -66,15 +63,6 @@ pub struct BuildPayrollResult {
     pub descriptor: String,
     pub recipient_count: usize,
     pub outputs: Vec<PayrollOutput>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FinalizePayrollResult {
-    pub final_psbt_path: PathBuf,
-    pub final_tx_hex_path: PathBuf,
-    pub txid: String,
-    pub tx_hex: String,
-    pub verified_outputs: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -142,34 +130,6 @@ pub fn build_payroll(config: BuildPayrollConfig) -> Result<BuildPayrollResult> {
         descriptor,
         recipient_count: recipients.len(),
         outputs,
-    })
-}
-
-pub fn finalize_payroll(psbt_path: impl AsRef<Path>) -> Result<FinalizePayrollResult> {
-    let psbt_path = psbt_path.as_ref();
-    let secp = Secp256k1::new();
-    let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX)?;
-    let psbt_bytes = fs::read(psbt_path)
-        .with_context(|| format!("failed to read PSBT {}", psbt_path.display()))?;
-    let mut psbt = SilentPaymentPsbt::deserialize(&psbt_bytes).context("failed to parse PSBT")?;
-
-    let message = workflow::compute_sighash(&psbt)?;
-    let tx = workflow::aggregate_and_extract(&secp, &mut psbt, &keys.key_agg_ctx, &message)?;
-    let verified_outputs = verify_outputs_discoverable(&secp, &keys, &psbt, &tx)?;
-    let tx_hex = bitcoin::consensus::encode::serialize_hex(&tx);
-
-    let out_dir = psbt_path.parent().unwrap_or_else(|| Path::new("."));
-    let final_psbt_path = out_dir.join("musig2-sp-final.psbt");
-    let final_tx_hex_path = out_dir.join("musig2-sp-final-hex.txt");
-    fs::write(&final_psbt_path, psbt.serialize())?;
-    fs::write(&final_tx_hex_path, &tx_hex)?;
-
-    Ok(FinalizePayrollResult {
-        final_psbt_path,
-        final_tx_hex_path,
-        txid: tx.compute_txid().to_string(),
-        tx_hex,
-        verified_outputs,
     })
 }
 
@@ -390,128 +350,4 @@ fn payroll_outputs(
         }
     }
     Ok(outputs)
-}
-
-fn reconstruct_aggregate_input_secret(
-    secp: &Secp256k1<secp256k1::All>,
-    keys: &KeySetup,
-    lift_x_q: &PublicKey,
-) -> Result<SecretKey> {
-    let participants = [
-        (keys.alice_sk, keys.alice_pk),
-        (keys.bob_sk, keys.bob_pk),
-        (keys.charlie_sk, keys.charlie_pk),
-    ];
-
-    let mut terms: Vec<SecretKey> = Vec::with_capacity(3);
-    for (sk, pk) in participants {
-        let musig_pk = musig2::secp256k1::PublicKey::from_slice(&pk.serialize())
-            .map_err(|e| anyhow::anyhow!("musig pubkey convert: {e}"))?;
-        let coeff = keys
-            .key_agg_ctx
-            .key_coefficient(musig_pk)
-            .ok_or_else(|| anyhow::anyhow!("participant not in key_agg_ctx"))?;
-        let coeff_bytes: [u8; 32] = match coeff {
-            musig2::secp::MaybeScalar::Valid(scalar) => scalar.into(),
-            musig2::secp::MaybeScalar::Zero => [0u8; 32],
-        };
-        terms.push(sk.mul_tweak(&Scalar::from_be_bytes(coeff_bytes)?)?);
-    }
-
-    let mut p_sk = terms[0];
-    p_sk = p_sk.add_tweak(&Scalar::from_be_bytes(terms[1].secret_bytes())?)?;
-    p_sk = p_sk.add_tweak(&Scalar::from_be_bytes(terms[2].secret_bytes())?)?;
-
-    let tacc_bytes: [u8; 32] = match keys.key_agg_ctx.tweak_sum::<musig2::secp::Scalar>() {
-        Some(t) => t.into(),
-        None => [0u8; 32],
-    };
-    let tacc_is_zero = tacc_bytes == [0u8; 32];
-
-    for negate_p in [false, true] {
-        for negate_t in [false, true] {
-            let mut cand = if negate_p { p_sk.negate() } else { p_sk };
-            if !tacc_is_zero {
-                let mut tacc_sk = SecretKey::from_slice(&tacc_bytes)?;
-                if negate_t {
-                    tacc_sk = tacc_sk.negate();
-                }
-                cand = cand.add_tweak(&Scalar::from_be_bytes(tacc_sk.secret_bytes())?)?;
-            }
-            if PublicKey::from_secret_key(secp, &cand) == *lift_x_q {
-                return Ok(cand);
-            }
-            if tacc_is_zero {
-                break;
-            }
-        }
-    }
-
-    bail!("could not reconstruct aggregate input secret matching lift_x(Q)")
-}
-
-fn verify_outputs_discoverable(
-    secp: &Secp256k1<secp256k1::All>,
-    keys: &KeySetup,
-    psbt: &SilentPaymentPsbt,
-    tx: &bitcoin::Transaction,
-) -> Result<usize> {
-    let mut q_even = [0u8; 33];
-    q_even[0] = 0x02;
-    q_even[1..].copy_from_slice(&keys.agg_xonly.serialize());
-    let lift_x_q = PublicKey::from_slice(&q_even)?;
-    let a_q = reconstruct_aggregate_input_secret(secp, keys, &lift_x_q)?;
-
-    let input_pk = extract_eligible_input_pubkey(&psbt.inputs[0])
-        .map_err(|e| anyhow::anyhow!("input pubkey: {e:?}"))?
-        .ok_or_else(|| anyhow::anyhow!("input 0 not eligible"))?;
-    if PublicKey::from_secret_key(secp, &a_q) != input_pk {
-        bail!("reconstructed input secret does not match PSBT input pubkey");
-    }
-    if input_pk != lift_x_q {
-        bail!("PSBT input pubkey does not match lift_x(Q)");
-    }
-
-    let smallest_arr: [u8; 36] = psbt
-        .inputs
-        .iter()
-        .map(input_outpoint_bytes)
-        .min()
-        .ok_or_else(|| anyhow::anyhow!("no inputs"))?;
-    let input_pks: Vec<PublicKey> = psbt
-        .inputs
-        .iter()
-        .filter_map(|input| extract_eligible_input_pubkey(input).transpose())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("input pubkey: {e:?}"))?;
-    let input_pk_refs: Vec<&PublicKey> = input_pks.iter().collect();
-    let a_sum = PublicKey::combine_keys(&input_pk_refs)
-        .map_err(|e| anyhow::anyhow!("combine input pubkeys: {e}"))?;
-    let input_hash = Scalar::from_be_bytes(input_hash_bytes(&smallest_arr, &a_sum))?;
-
-    let mut scan_key_k: HashMap<PublicKey, u32> = HashMap::new();
-    let mut verified = 0usize;
-    for i in 0..psbt.outputs.len() {
-        let Some((scan_pk, spend_pk)) = get_output_sp_info(&psbt.outputs[i])? else {
-            continue;
-        };
-        let shared_secret = scan_pk
-            .mul_tweak(secp, &Scalar::from(a_q))
-            .map_err(|e| anyhow::anyhow!("ecdh: {e}"))?
-            .mul_tweak(secp, &input_hash)
-            .map_err(|e| anyhow::anyhow!("apply input hash: {e}"))?;
-        let k = *scan_key_k.get(&scan_pk).unwrap_or(&0);
-        let output_pk =
-            derive_silent_payment_output_pubkey(secp, &spend_pk, &shared_secret.serialize(), k)?;
-        let expected = tweaked_key_to_p2tr_script(&output_pk);
-        if psbt.outputs[i].script_pubkey != expected || tx.output[i].script_pubkey != expected {
-            bail!("output {i}: script does not match recipient-derived script");
-        }
-        scan_key_k.insert(scan_pk, k + 1);
-        verified += 1;
-    }
-    if verified == 0 {
-        bail!("no SP outputs found to verify");
-    }
-    Ok(verified)
 }

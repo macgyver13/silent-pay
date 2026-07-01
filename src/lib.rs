@@ -1,16 +1,13 @@
+pub mod demo;
+pub mod finalize;
 pub mod musig2_psbt;
 pub mod musig2_spdk;
-pub mod operations;
-pub mod real_payroll;
+pub mod payroll;
 pub mod recipients;
 pub mod wallet;
-pub mod workflow;
 
-pub use operations::{
-    build_payroll, finalize_payroll, scan_recipients, BuildPayrollConfig, BuildPayrollResult,
-    FinalizePayrollResult, PayrollOutput, RecipientScanResult, ScanRecipientsResult,
-};
-pub use real_payroll::{
+pub use finalize::{finalize_payroll, FinalizePayrollResult};
+pub use payroll::{
     build_initial_payroll_psbt, BuildInitialPayrollConfig, BuildInitialPayrollResult,
     TreasuryPrevout,
 };

@@ -24,17 +24,17 @@ silentpayments = { path = "/Users/ron/src/spdk/silentpayments" }
 toml = "0.9.12"
 
 [[bin]]
-name = "payroll"
-path = "src/bin/build_payroll.rs"
+name = "gui"
+path = "src/bin/gui.rs"
 
 [[bin]]
 name = "finalize"
-path = "src/bin/finalize_payroll.rs"
+path = "src/bin/demo/finalize_payroll.rs"
+
+[[bin]]
+name = "payroll"
+path = "src/bin/demo/build_payroll.rs"
 
 [[bin]]
 name = "scan_recipients"
-path = "src/bin/scan_recipients.rs"
-
-[[bin]]
-name = "gui"
-path = "src/bin/gui.rs"
+path = "src/bin/demo/scan_recipients.rs"

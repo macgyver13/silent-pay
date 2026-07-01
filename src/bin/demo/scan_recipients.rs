@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use silent_pay::scan_recipients;
+use silent_pay::demo::scan_recipients;
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
