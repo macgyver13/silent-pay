@@ -1,9 +1,9 @@
 use bitcoin::Amount;
 use psbt::roles::signer::extract_eligible_input_pubkey;
 use secp256k1::{PublicKey, Secp256k1, XOnlyPublicKey};
+use silent_pay::demo::workflow;
 use silent_pay::musig2_psbt::PSBT_IN_MUSIG2_PARTIAL_DLEQ;
 use silent_pay::recipients::{address_amounts, parse_recipients, recipient_keys};
-use silent_pay::demo::workflow;
 use silentpayments::receiving::{Label, Receiver};
 use silentpayments::utils::receiving::PublicTweakData;
 use silentpayments::utils::OutPoint as SpOutPoint;

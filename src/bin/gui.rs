@@ -8,18 +8,18 @@ use silent_pay::{
     load_wallet, save_recipients, save_wallet, BuildInitialPayrollConfig, RecipientEntry,
     TreasuryPrevout, TreasurySigner, TreasuryWalletConfig,
 };
-use slint::{ComponentHandle, SharedString};
+use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 slint::slint! {
-    import { Button, LineEdit, TextEdit } from "std-widgets.slint";
+    import { Button, LineEdit, StandardTableView, TextEdit } from "std-widgets.slint";
 
     export component PayrollGui inherits Window {
         title: "Silent Pay";
         preferred-width: 1274px;
-        preferred-height: 1028px;
+        preferred-height: 760px;
         min-width: 760px;
         min-height: 640px;
         max-width: 4096px;
@@ -31,16 +31,20 @@ slint::slint! {
         in-out property <string> change_derivation_index: "1";
         in-out property <string> utxo_derivation_index: "0";
         in-out property <string> descriptor: "";
-        in-out property <string> signer_table: "";
+        in-out property <[[StandardListViewItem]]> signer_rows;
         in-out property <string> utxos_path: "testnet/utxos.toml";
-        in-out property <string> utxo_rows: "";
-        in-out property <string> selected_utxo_row: "1";
+        in-out property <[[StandardListViewItem]]> utxo_rows;
+        in-out property <int> selected_utxo_row: -1;
+        in-out property <bool> show_signers: false;
+        in-out property <bool> show_utxos: false;
+        in-out property <bool> show_recipients: false;
         in-out property <string> pending_spent_txid: "";
         in-out property <string> pending_spent_vout: "";
         in-out property <string> pending_change_txid: "";
         in-out property <string> pending_change_vout: "";
         in-out property <string> pending_change_amount_sat: "";
         in-out property <string> pending_change_derivation_index: "";
+        in-out property <string> pending_change_label: "payroll change";
         in-out property <string> recipients_path: "testnet/recipients.toml";
         in-out property <string> recipient_rows: "";
         in-out property <string> txid: "";
@@ -62,12 +66,12 @@ slint::slint! {
         callback save_wallet();
         callback load_utxos();
         callback save_utxos();
-        callback use_selected_utxo();
+        callback select_utxo(int);
         callback add_utxo();
+        callback remove_utxo();
         callback save_utxo_state();
         callback load_recipients();
         callback save_recipients();
-        callback read_final_txid();
         callback save_psbt();
         callback pick_finalize_psbt();
         callback finalize_loaded_psbt();
@@ -105,76 +109,67 @@ slint::slint! {
                     LineEdit { text <=> root.change_derivation_index; width: 90px; }
                 }
                 Text { text: "Descriptor"; }
-                TextEdit { text <=> root.descriptor; height: 170px; }
-                Text { text: "Signers"; }
-                Rectangle {
-                    border-width: 1px;
-                    border-color: #c8c8c8;
-                    background: #f8f8f8;
-                    height: 110px;
-                    Text {
-                        text: root.signer_table;
-                        font-family: "monospace";
-                        font-size: 13px;
-                        color: #222;
-                        x: 8px;
-                        y: 8px;
-                        width: parent.width - 16px;
-                        height: parent.height - 16px;
-                        wrap: no-wrap;
+                TextEdit { text <=> root.descriptor; height: 85px; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: root.show_signers ? "Hide Signers" : "Show Signers";
+                        clicked => { root.show_signers = !root.show_signers; }
                     }
                 }
+                if root.show_signers : StandardTableView {
+                    height: 120px;
+                    rows <=> root.signer_rows;
+                    columns: [
+                        { title: "XFP", min-width: 90px, width: 90px, horizontal-stretch: 0 },
+                        { title: "Derivation", min-width: 210px, width: 230px, horizontal-stretch: 0 },
+                        { title: "Xpub", min-width: 540px, width: 540px, horizontal-stretch: 1 },
+                    ];
+                }
 
-                Text { text: "UTXOs"; font-size: 20px; }
                 HorizontalLayout {
                     spacing: 8px;
-                    Text { text: "File"; width: 110px; vertical-alignment: center; }
-                    LineEdit { text <=> root.utxos_path; }
-                    Button { text: "Load"; clicked => { root.load_utxos(); } }
-                    Button { text: "Save"; clicked => { root.save_utxos(); } }
-                }
-                Rectangle {
-                    border-width: 1px;
-                    border-color: #c8c8c8;
-                    background: #f8f8f8;
-                    height: 130px;
-                    Text {
-                        text: root.utxo_rows;
-                        font-family: "monospace";
-                        font-size: 13px;
-                        color: #222;
-                        x: 8px;
-                        y: 8px;
-                        width: parent.width - 16px;
-                        height: parent.height - 16px;
-                        wrap: no-wrap;
+                    Text { text: "UTXOs"; font-size: 20px; vertical-alignment: center; }
+                    Button {
+                        text: root.show_utxos ? "Hide" : "Show";
+                        clicked => { root.show_utxos = !root.show_utxos; }
                     }
                 }
-                HorizontalLayout {
-                    spacing: 8px;
-                    Text { text: "Row"; width: 110px; vertical-alignment: center; }
-                    LineEdit { text <=> root.selected_utxo_row; width: 90px; }
-                    Button { text: "Use Selected"; clicked => { root.use_selected_utxo(); } }
-                    Button { text: "Add Manual"; clicked => { root.add_utxo(); } }
+                if root.show_utxos : VerticalLayout {
+                    spacing: 12px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "File"; width: 110px; vertical-alignment: center; }
+                        LineEdit { text <=> root.utxos_path; }
+                        Button { text: "Load"; clicked => { root.load_utxos(); } }
+                        Button { text: "Save"; clicked => { root.save_utxos(); } }
+                    }
+                    StandardTableView {
+                        height: 170px;
+                        rows <=> root.utxo_rows;
+                        current-row <=> root.selected_utxo_row;
+                        columns: [
+                            { title: "Status", min-width: 90px, width: 95px, horizontal-stretch: 0 },
+                            { title: "Txid", min-width: 560px, width: 570px, horizontal-stretch: 1 },
+                            { title: "Vout", min-width: 90px, width: 90px, horizontal-stretch: 0 },
+                            { title: "Amount sat", min-width: 120px, width: 130px, horizontal-stretch: 0 },
+                            { title: "Index", min-width: 70px, width: 70px, horizontal-stretch: 0 },
+                            { title: "Label", min-width: 160px, width: 180px, horizontal-stretch: 1 },
+                        ];
+                        current-row-changed(row) => { root.select_utxo(row); }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button { text: "Add Previous Output"; clicked => { root.add_utxo(); } }
+                        Button { text: "Remove Previous Output"; clicked => { root.remove_utxo(); } }
+                    }
                 }
-
-                Text { text: "Recipients"; font-size: 20px; }
-                HorizontalLayout {
-                    spacing: 8px;
-                    Text { text: "File"; width: 110px; vertical-alignment: center; }
-                    LineEdit { text <=> root.recipients_path; }
-                    Button { text: "Load"; clicked => { root.load_recipients(); } }
-                    Button { text: "Save"; clicked => { root.save_recipients(); } }
-                }
-                Text { text: "Rows: label,address,amount_sat"; }
-                TextEdit { text <=> root.recipient_rows; height: 150px; }
 
                 Text { text: "Payroll"; font-size: 20px; }
                 HorizontalLayout {
                     spacing: 8px;
                     Text { text: "Txid"; width: 110px; vertical-alignment: center; }
                     LineEdit { text <=> root.txid; }
-                    Button { text: "Read Final Tx"; clicked => { root.read_final_txid(); } }
                 }
                 HorizontalLayout {
                     spacing: 8px;
@@ -192,6 +187,27 @@ slint::slint! {
                     Text { text: "PSBT"; width: 110px; vertical-alignment: center; }
                     LineEdit { text <=> root.psbt_path; }
                     Button { text: "Save PSBT"; clicked => { root.save_psbt(); } }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "Recipients"; font-size: 20px; vertical-alignment: center; }
+                    Button {
+                        text: root.show_recipients ? "Hide" : "Show";
+                        clicked => { root.show_recipients = !root.show_recipients; }
+                    }
+                }
+                if root.show_recipients : VerticalLayout {
+                    spacing: 12px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "File"; width: 110px; vertical-alignment: center; }
+                        LineEdit { text <=> root.recipients_path; }
+                        Button { text: "Load"; clicked => { root.load_recipients(); } }
+                        Button { text: "Save"; clicked => { root.save_recipients(); } }
+                    }
+                    Text { text: "Rows: label,address,amount_sat"; }
+                    TextEdit { text <=> root.recipient_rows; height: 150px; }
                 }
             }
 
@@ -228,6 +244,8 @@ slint::slint! {
                     LineEdit { text <=> root.pending_change_derivation_index; width: 90px; }
                     Text { text: "Amount sat"; width: 110px; vertical-alignment: center; }
                     LineEdit { text <=> root.pending_change_amount_sat; width: 170px; }
+                    Text { text: "Label"; width: 70px; vertical-alignment: center; }
+                    LineEdit { text <=> root.pending_change_label; width: 220px; }
                     Button { text: "Save UTXO State"; clicked => { root.save_utxo_state(); } }
                 }
 
@@ -272,11 +290,15 @@ fn main() -> Result<()> {
     }
     {
         let weak = ui.as_weak();
-        ui.on_use_selected_utxo(move || set_status(&weak, use_selected_utxo_from_ui(&weak)));
+        ui.on_select_utxo(move |row| set_status(&weak, select_utxo_from_ui(&weak, row)));
     }
     {
         let weak = ui.as_weak();
         ui.on_add_utxo(move || set_status(&weak, add_utxo_from_ui(&weak)));
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_remove_utxo(move || set_status(&weak, remove_utxo_from_ui(&weak)));
     }
     {
         let weak = ui.as_weak();
@@ -289,10 +311,6 @@ fn main() -> Result<()> {
     {
         let weak = ui.as_weak();
         ui.on_save_recipients(move || set_status(&weak, save_recipients_from_ui(&weak)));
-    }
-    {
-        let weak = ui.as_weak();
-        ui.on_read_final_txid(move || set_status(&weak, read_final_txid_into_ui(&weak)));
     }
     {
         let weak = ui.as_weak();
@@ -314,8 +332,23 @@ fn main() -> Result<()> {
         let weak = ui.as_weak();
         ui.on_broadcast_final_tx(move || set_status(&weak, broadcast_final_tx_from_ui(&weak)));
     }
+
+    let config = load_app_config();
+    ui.set_wallet_network(config.network.clone().into());
+    if default_network_directory(&config.network).is_some() {
+        let weak = ui.as_weak();
+        set_status(&weak, load_configured_network(&weak));
+    }
+
     ui.run()?;
     Ok(())
+}
+
+fn load_configured_network(weak: &slint::Weak<PayrollGui>) -> Result<String> {
+    load_wallet_into_ui(weak)?;
+    load_recipients_into_ui(weak)?;
+    load_utxos_into_ui(weak)?;
+    Ok("Loaded wallet, recipients, and UTXOs".to_string())
 }
 
 fn load_wallet_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
@@ -331,7 +364,7 @@ fn load_wallet_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_last_derivation_index(wallet.last_derivation_index.to_string().into());
     ui.set_change_derivation_index(wallet.change_derivation_index.to_string().into());
     ui.set_descriptor(wallet.descriptor.unwrap_or_default().into());
-    ui.set_signer_table(format_signers(&wallet.signers).into());
+    ui.set_signer_rows(signer_rows(&wallet.signers));
     Ok("Loaded wallet".to_string())
 }
 
@@ -345,9 +378,10 @@ fn save_wallet_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     );
     ui.set_wallet_path(path.display().to_string().into());
     save_wallet(&path, &wallet)?;
+    save_app_config(&wallet.network)?;
     let wallet = load_wallet(&path)?;
     ui.set_descriptor(wallet.descriptor.unwrap_or_default().into());
-    ui.set_signer_table(format_signers(&wallet.signers).into());
+    ui.set_signer_rows(signer_rows(&wallet.signers));
     Ok("Saved wallet".to_string())
 }
 
@@ -360,7 +394,7 @@ fn load_utxos_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     );
     ui.set_utxos_path(path.display().to_string().into());
     let utxos = load_utxos(&path)?;
-    ui.set_utxo_rows(format_utxos(&utxos).into());
+    ui.set_utxo_rows(utxo_rows(&utxos));
     Ok(format!("Loaded {} UTXOs", utxos.utxos.len()))
 }
 
@@ -374,13 +408,13 @@ fn save_utxos_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_utxos_path(path.display().to_string().into());
     let utxos = load_utxos_or_default(&path)?;
     save_utxos(&path, &utxos)?;
-    ui.set_utxo_rows(format_utxos(&utxos).into());
+    ui.set_utxo_rows(utxo_rows(&utxos));
     Ok("Saved UTXOs".to_string())
 }
 
-fn use_selected_utxo_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
+fn select_utxo_from_ui(weak: &slint::Weak<PayrollGui>, row: i32) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
-    let utxo = selected_utxo(&ui)?;
+    let utxo = selected_utxo(&ui, row)?;
     if utxo.status != UtxoStatus::Available {
         bail!("selected UTXO is not available");
     }
@@ -390,10 +424,7 @@ fn use_selected_utxo_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_utxo_derivation_index(utxo.derivation_index.to_string().into());
     ui.set_last_derivation_index(utxo.derivation_index.to_string().into());
     ui.set_change_derivation_index(utxo.derivation_index.saturating_add(1).to_string().into());
-    Ok(format!(
-        "Selected UTXO row {}",
-        ui.get_selected_utxo_row().as_str()
-    ))
+    Ok(format!("Selected UTXO row {}", row + 1))
 }
 
 fn add_utxo_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
@@ -408,8 +439,32 @@ fn add_utxo_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let utxo = utxo_from_ui(&ui, UtxoStatus::Available)?;
     append_fresh_utxo(&mut utxos, utxo)?;
     save_utxos(&path, &utxos)?;
-    ui.set_utxo_rows(format_utxos(&utxos).into());
+    ui.set_utxo_rows(utxo_rows(&utxos));
     Ok("Added UTXO".to_string())
+}
+
+fn remove_utxo_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
+    let ui = weak.upgrade().context("GUI closed")?;
+    let path = default_path_for_network(
+        ui.get_wallet_network().as_str(),
+        ui.get_utxos_path().as_str(),
+        "utxos.toml",
+    );
+    ui.set_utxos_path(path.display().to_string().into());
+    let mut utxos = load_utxos(&path)?;
+    let row = ui.get_selected_utxo_row();
+    if row < 0 || row as usize >= utxos.utxos.len() {
+        bail!("select a UTXO row to remove");
+    }
+    let utxo = &utxos.utxos[row as usize];
+    if !confirm_remove_utxo(utxo) {
+        return Ok("UTXO removal canceled".to_string());
+    }
+    let removed = utxos.utxos.remove(row as usize);
+    save_utxos(&path, &utxos)?;
+    ui.set_selected_utxo_row(-1);
+    ui.set_utxo_rows(utxo_rows(&utxos));
+    Ok(format!("Removed UTXO {}:{}", removed.txid, removed.vout))
 }
 
 fn load_recipients_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
@@ -448,27 +503,6 @@ fn save_recipients_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_recipients_path(path.display().to_string().into());
     save_recipients(&path, &recipients)?;
     Ok("Saved recipients".to_string())
-}
-
-fn read_final_txid_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
-    let ui = weak.upgrade().context("GUI closed")?;
-    let Some(path) = rfd::FileDialog::new()
-        .set_title("Open final tx hex")
-        .pick_file()
-    else {
-        return Ok("Final tx read canceled".to_string());
-    };
-    let tx_hex = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read final tx hex {}", path.display()))?;
-    let tx_bytes = hex::decode(tx_hex.trim()).context("final tx hex is not valid hex")?;
-    let tx: Transaction =
-        bitcoin::consensus::encode::deserialize(&tx_bytes).context("failed to parse final tx")?;
-    let txid = tx.compute_txid().to_string();
-    ui.set_txid(txid.clone().into());
-    Ok(format!(
-        "Read txid from {}; enter vout, amount, and index, then Add Manual",
-        path.display()
-    ))
 }
 
 fn save_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
@@ -566,6 +600,7 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
     ui.set_pending_change_vout(change.vout.to_string().into());
     ui.set_pending_change_amount_sat(change.amount_sat.to_string().into());
     ui.set_pending_change_derivation_index(change.derivation_index.to_string().into());
+    ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
     ui.set_last_derivation_index(change.derivation_index.to_string().into());
     ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
     ui.set_final_tx_hex_path(result.final_tx_hex_path.display().to_string().into());
@@ -630,11 +665,11 @@ fn save_utxo_state_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
             "pending change derivation index",
         )?,
         status: UtxoStatus::Available,
-        label: Some("payroll change".to_string()),
+        label: blank_to_none(ui.get_pending_change_label().as_str()),
     };
     append_fresh_utxo(&mut utxos, change)?;
     save_utxos(&path, &utxos)?;
-    ui.set_utxo_rows(format_utxos(&utxos).into());
+    ui.set_utxo_rows(utxo_rows(&utxos));
 
     save_wallet_from_ui(weak)?;
     Ok("Saved UTXO state".to_string())
@@ -648,12 +683,41 @@ fn load_final_tx_hex_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     else {
         return Ok("Final tx hex open canceled".to_string());
     };
-    let txid = txid_from_hex_file(&path)?;
+    let tx = final_tx_from_hex_file(&path)?;
+    let txid = tx.compute_txid().to_string();
+    let spent = single_spent_prevout(&tx)?;
+    let change_derivation_index = parse_u32(
+        ui.get_change_derivation_index().as_str(),
+        "change derivation index",
+    )?;
+    let change =
+        change_prevout_from_tx(&tx, &txid, &wallet_from_ui(&ui)?, change_derivation_index)?;
+    let next_change_derivation_index = next_change_derivation_index(change.derivation_index);
+
     ui.set_final_tx_hex_path(path.display().to_string().into());
     ui.set_final_txid(txid.clone().into());
-    ui.set_txid(txid.clone().into());
+    ui.set_pending_spent_txid(spent.txid.to_string().into());
+    ui.set_pending_spent_vout(spent.vout.to_string().into());
+    ui.set_pending_change_txid(txid.clone().into());
+    ui.set_pending_change_vout(change.vout.to_string().into());
+    ui.set_pending_change_amount_sat(change.amount_sat.to_string().into());
+    ui.set_pending_change_derivation_index(change.derivation_index.to_string().into());
+    ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
+    ui.set_last_derivation_index(change.derivation_index.to_string().into());
+    ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
     ui.set_finalize_summary(
-        format!("loaded final tx hex: {}\ntxid: {txid}", path.display()).into(),
+        format!(
+            "loaded final tx hex: {}\ntxid: {txid}\nspent input: {}:{}\nnew change: {}:{}\nchange amount: {}\nchange derivation index: {}\nnext change derivation index: {}",
+            path.display(),
+            spent.txid,
+            spent.vout,
+            txid,
+            change.vout,
+            change.amount_sat,
+            change.derivation_index,
+            next_change_derivation_index
+        )
+        .into(),
     );
     Ok("Loaded final tx hex".to_string())
 }
@@ -682,6 +746,35 @@ fn broadcast_final_tx_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> 
         .send_raw_transaction(tx_hex)
         .context("Bitcoin Core sendrawtransaction failed")?;
     Ok(format!("Broadcast transaction {txid}"))
+}
+
+const CONFIG_PATH: &str = "config.toml";
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AppConfig {
+    #[serde(default = "default_config_network")]
+    network: String,
+}
+
+fn default_config_network() -> String {
+    "testnet".to_string()
+}
+
+fn load_app_config() -> AppConfig {
+    fs::read_to_string(CONFIG_PATH)
+        .ok()
+        .and_then(|contents| toml::from_str(&contents).ok())
+        .unwrap_or_else(|| AppConfig {
+            network: default_config_network(),
+        })
+}
+
+fn save_app_config(network: &str) -> Result<()> {
+    let config = AppConfig {
+        network: network.to_string(),
+    };
+    fs::write(CONFIG_PATH, toml::to_string_pretty(&config)?)
+        .with_context(|| format!("failed to write config {CONFIG_PATH}"))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -799,42 +892,30 @@ fn save_utxos(path: impl AsRef<Path>, utxos: &UtxoFile) -> Result<()> {
         .with_context(|| format!("failed to write UTXOs {}", path.display()))
 }
 
-fn format_utxos(utxos: &UtxoFile) -> String {
-    let mut rows = vec![format!(
-        "{:<4} {:<9} {:<14} {:<5} {:>12} {:>5} {}",
-        "row", "status", "txid", "vout", "amount_sat", "index", "label"
-    )];
-    rows.extend(utxos.utxos.iter().enumerate().map(|(idx, utxo)| {
-        format!(
-            "{:<4} {:<9} {:<14} {:<5} {:>12} {:>5} {}",
-            idx + 1,
-            utxo.status.as_str(),
-            short_txid(&utxo.txid),
-            utxo.vout,
-            utxo.amount_sat,
-            utxo.derivation_index,
-            utxo.label.as_deref().unwrap_or("")
-        )
-    }));
-    rows.join("\n")
+fn utxo_rows(utxos: &UtxoFile) -> ModelRc<ModelRc<StandardListViewItem>> {
+    table_rows(utxos.utxos.iter().map(|utxo| {
+        vec![
+            utxo.status.as_str().to_string(),
+            utxo.txid.clone(),
+            utxo.vout.to_string(),
+            utxo.amount_sat.to_string(),
+            utxo.derivation_index.to_string(),
+            utxo.label.clone().unwrap_or_default(),
+        ]
+    }))
 }
 
-fn selected_utxo(ui: &PayrollGui) -> Result<TreasuryUtxo> {
+fn selected_utxo(ui: &PayrollGui, row: i32) -> Result<TreasuryUtxo> {
     let path = default_path_for_network(
         ui.get_wallet_network().as_str(),
         ui.get_utxos_path().as_str(),
         "utxos.toml",
     );
     let utxos = load_utxos(&path)?;
-    let row: usize = ui
-        .get_selected_utxo_row()
-        .as_str()
-        .parse()
-        .context("invalid selected UTXO row")?;
-    if row == 0 || row > utxos.utxos.len() {
+    if row < 0 || row as usize >= utxos.utxos.len() {
         bail!("selected UTXO row is out of range");
     }
-    Ok(utxos.utxos[row - 1].clone())
+    Ok(utxos.utxos[row as usize].clone())
 }
 
 fn append_fresh_utxo(utxos: &mut UtxoFile, utxo: TreasuryUtxo) -> Result<()> {
@@ -872,13 +953,6 @@ fn mark_utxo_spent(utxos: &mut UtxoFile, txid: &str, vout: u32) -> Result<()> {
     }
     utxo.status = UtxoStatus::Spent;
     Ok(())
-}
-
-fn short_txid(txid: &str) -> String {
-    if txid.len() <= 14 {
-        return txid.to_string();
-    }
-    format!("{}...{}", &txid[..6], &txid[txid.len() - 5..])
 }
 
 impl UtxoStatus {
@@ -925,6 +999,49 @@ fn change_prevout_from_psbt(
         status: UtxoStatus::Available,
         label: Some("payroll change".to_string()),
     })
+}
+
+fn change_prevout_from_tx(
+    tx: &Transaction,
+    txid: &str,
+    wallet: &TreasuryWalletConfig,
+    derivation_index: u32,
+) -> Result<TreasuryUtxo> {
+    let change_script = derive_treasury_script_pubkey(wallet, derivation_index)?;
+    let change = tx
+        .output
+        .iter()
+        .enumerate()
+        .filter(|(_, output)| output.script_pubkey == change_script)
+        .map(|(vout, output)| (vout, output.value.to_sat()))
+        .collect::<Vec<_>>();
+    if change.len() != 1 {
+        bail!(
+            "expected exactly one output matching change derivation index {derivation_index}, found {}",
+            change.len()
+        );
+    }
+    let (vout, amount_sat) = change[0];
+    Ok(TreasuryUtxo {
+        txid: txid.to_string(),
+        vout: vout
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("change vout does not fit u32"))?,
+        amount_sat,
+        derivation_index,
+        status: UtxoStatus::Available,
+        label: Some("payroll change".to_string()),
+    })
+}
+
+fn single_spent_prevout(tx: &Transaction) -> Result<bitcoin::OutPoint> {
+    if tx.input.len() != 1 {
+        bail!(
+            "expected exactly one input in final transaction, found {}",
+            tx.input.len()
+        );
+    }
+    Ok(tx.input[0].previous_output)
 }
 
 fn parse_u32(value: &str, label: &str) -> Result<u32> {
@@ -996,37 +1113,51 @@ fn is_default_file_path(path: &Path, file_name: &str) -> bool {
         && path.file_name().and_then(|name| name.to_str()) == Some(file_name)
 }
 
-fn txid_from_hex_file(path: impl AsRef<Path>) -> Result<String> {
+fn final_tx_from_hex_file(path: impl AsRef<Path>) -> Result<Transaction> {
     let path = path.as_ref();
     let tx_hex = fs::read_to_string(path)
         .with_context(|| format!("failed to read final tx hex {}", path.display()))?;
     let tx_bytes = hex::decode(tx_hex.trim()).context("final tx hex is not valid hex")?;
-    let tx: Transaction =
-        bitcoin::consensus::encode::deserialize(&tx_bytes).context("failed to parse final tx")?;
-    Ok(tx.compute_txid().to_string())
+    bitcoin::consensus::encode::deserialize(&tx_bytes).context("failed to parse final tx")
 }
 
-fn format_signers(signers: &[TreasurySigner]) -> String {
-    let rows = signers
-        .iter()
-        .map(|signer| {
-            format!(
-                "{:<10} {:<22} {}",
-                signer.xfp,
-                signer.derivation_path,
-                partial_xpub(&signer.xpub)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("{:<10} {:<22} {}\n{}", "xfp", "derivation", "xpub", rows)
+fn signer_rows(signers: &[TreasurySigner]) -> ModelRc<ModelRc<StandardListViewItem>> {
+    table_rows(signers.iter().map(|signer| {
+        vec![
+            signer.xfp.to_string(),
+            signer.derivation_path.to_string(),
+            signer.xpub.to_string(),
+        ]
+    }))
 }
 
-fn partial_xpub(xpub: &str) -> String {
-    if xpub.len() <= 34 {
-        return xpub.to_string();
-    }
-    format!("{}...{}", &xpub[..18], &xpub[xpub.len() - 13..])
+fn table_rows(
+    rows: impl IntoIterator<Item = Vec<String>>,
+) -> ModelRc<ModelRc<StandardListViewItem>> {
+    ModelRc::new(VecModel::from(
+        rows.into_iter()
+            .map(|row| {
+                ModelRc::new(VecModel::from(
+                    row.into_iter()
+                        .map(|text| StandardListViewItem::from(SharedString::from(text)))
+                        .collect::<Vec<_>>(),
+                ))
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn confirm_remove_utxo(utxo: &TreasuryUtxo) -> bool {
+    rfd::MessageDialog::new()
+        .set_title("Remove UTXO")
+        .set_description(format!(
+            "Remove UTXO {}:{} from the wallet state?",
+            utxo.txid, utxo.vout
+        ))
+        .set_buttons(rfd::MessageButtons::OkCancel)
+        .set_level(rfd::MessageLevel::Warning)
+        .show()
+        == rfd::MessageDialogResult::Ok
 }
 
 fn blank_to_none(value: &str) -> Option<String> {
@@ -1127,5 +1258,17 @@ mod tests {
     #[test]
     fn selected_utxo_advances_change_derivation_index() {
         assert_eq!(next_change_derivation_index(7), 8);
+    }
+
+    #[test]
+    fn app_config_parses_network() {
+        let config: AppConfig = toml::from_str("network = \"mainnet\"").unwrap();
+        assert_eq!(config.network, "mainnet");
+    }
+
+    #[test]
+    fn app_config_defaults_to_testnet_when_empty() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(config.network, "testnet");
     }
 }
