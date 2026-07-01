@@ -87,9 +87,16 @@ pub fn build_initial_payroll_psbt(
         .ok_or_else(|| anyhow::anyhow!("change amount underflow"))?;
 
     let secp = Secp256k1::new();
-    let wallet_keys = derive_wallet_public_keys(&secp, &wallet)?;
+    let input_keys = derive_wallet_public_keys(&secp, &wallet, wallet.input_derivation_index)?;
+    let change_keys = derive_wallet_public_keys(&secp, &wallet, wallet.change_derivation_index)?;
     let recipient_pairs = address_amounts(&recipients);
-    let psbt = construct_initial_psbt(&wallet_keys, &config.prevout, &recipient_pairs, change)?;
+    let psbt = construct_initial_psbt(
+        &input_keys,
+        &change_keys,
+        &config.prevout,
+        &recipient_pairs,
+        change,
+    )?;
 
     if let Some(parent) = config.psbt_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -120,20 +127,21 @@ struct WalletPublicKeys {
 fn derive_wallet_public_keys(
     secp: &Secp256k1<secp256k1::All>,
     wallet: &WalletConfig,
+    derivation_index: u32,
 ) -> Result<WalletPublicKeys> {
     let mut participant_pks = Vec::with_capacity(wallet.signers.len());
     for signer in &wallet.signers {
         let xpub = signer.xpub_value()?;
         let child = xpub
-            .derive_pub(secp, &signer_child_path(wallet.derivation_index))
+            .derive_pub(secp, &signer_child_path(derivation_index))
             .with_context(|| format!("failed to derive signer xpub {}", signer.xfp))?;
         participant_pks.push(child.public_key);
     }
 
     let base_ctx = keyagg::build_key_agg_ctx(&participant_pks)?;
     let untweaked_agg_pk = keyagg::from_musig2_pubkey(&base_ctx.aggregated_pubkey())?;
-    let path = synthetic_derivation_path(wallet.derivation_index);
-    let path_indices = vec![0, wallet.derivation_index];
+    let path = synthetic_derivation_path(derivation_index);
+    let path_indices = vec![0, derivation_index];
     let plain_child_pk = apply_bip328_plain_tweaks(secp, untweaked_agg_pk, &path_indices)?;
     let (plain_child_xonly, _) = plain_child_pk.x_only_public_key();
     let (tweaked_ctx, _) =
@@ -153,7 +161,8 @@ fn derive_wallet_public_keys(
 }
 
 fn construct_initial_psbt(
-    keys: &WalletPublicKeys,
+    input_keys: &WalletPublicKeys,
+    change_keys: &WalletPublicKeys,
     prevout: &TreasuryPrevout,
     recipients: &[(silentpayments::SilentPaymentAddress, Amount)],
     change: Amount,
@@ -162,7 +171,7 @@ fn construct_initial_psbt(
     input.sequence = Some(Sequence::MAX);
     input.witness_utxo = Some(TxOut {
         value: prevout.amount,
-        script_pubkey: keys.p2tr_script.clone(),
+        script_pubkey: input_keys.p2tr_script.clone(),
     });
 
     let mut outputs: Vec<Output> = recipients
@@ -178,28 +187,28 @@ fn construct_initial_psbt(
         .collect();
     outputs.push(Output::new(TxOut {
         value: change,
-        script_pubkey: keys.p2tr_script.clone(),
+        script_pubkey: change_keys.p2tr_script.clone(),
     }));
 
     let mut psbt = build_psbt(vec![input], outputs).map_err(|e| anyhow::anyhow!(e))?;
-    psbt.inputs[0].tap_internal_key = Some(keys.plain_child_xonly);
+    psbt.inputs[0].tap_internal_key = Some(input_keys.plain_child_xonly);
     musig2_psbt::set_input_musig2_participant_pubkeys(
         &mut psbt.inputs[0],
-        &keys.untweaked_agg_pk,
-        &keys.participant_pks,
+        &input_keys.untweaked_agg_pk,
+        &input_keys.participant_pks,
     );
     psbt.inputs[0].set_sp_spend_bip32_derivation(
-        CompressedPublicKey(keys.untweaked_agg_pk),
+        CompressedPublicKey(input_keys.untweaked_agg_pk),
         bitcoin::bip32::Fingerprint::default(),
-        keys.path.clone(),
+        input_keys.path.clone(),
     );
 
     for output in &mut psbt.outputs {
         if output.sp_v0_info.is_none() {
             musig2_psbt::set_output_musig2_participant_pubkeys(
                 output,
-                &keys.untweaked_agg_pk,
-                &keys.participant_pks,
+                &change_keys.untweaked_agg_pk,
+                &change_keys.participant_pks,
             );
         }
     }
@@ -314,7 +323,8 @@ mod tests {
         let wallet = TreasuryWalletConfig {
             network: "testnet".to_string(),
             descriptor: None,
-            derivation_index: 0,
+            input_derivation_index: 0,
+            change_derivation_index: 1,
             signers: vec![
                 TreasurySigner {
                     xfp: "0f056943".to_string(),
@@ -355,6 +365,18 @@ mod tests {
             psbt.inputs[0].witness_utxo.as_ref().expect("utxo").value,
             prevout.amount
         );
+        let input_script = &psbt.inputs[0]
+            .witness_utxo
+            .as_ref()
+            .expect("utxo")
+            .script_pubkey;
+        let change_script = &psbt
+            .outputs
+            .iter()
+            .find(|output| output.sp_v0_info.is_none())
+            .expect("change output")
+            .script_pubkey;
+        assert_ne!(input_script, change_script);
         assert_eq!(
             psbt.outputs
                 .iter()

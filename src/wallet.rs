@@ -14,7 +14,9 @@ pub struct TreasuryWalletConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor: Option<String>,
     #[serde(default)]
-    pub derivation_index: u32,
+    pub input_derivation_index: u32,
+    #[serde(default = "default_change_derivation_index")]
+    pub change_derivation_index: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signers: Vec<TreasurySigner>,
 }
@@ -40,9 +42,35 @@ pub fn save_wallet(path: impl AsRef<Path>, wallet: &TreasuryWalletConfig) -> Res
 }
 
 pub fn parse_wallet(contents: &str) -> Result<TreasuryWalletConfig> {
-    let wallet: TreasuryWalletConfig =
+    let raw: RawTreasuryWalletConfig =
         toml::from_str(contents).context("failed to parse wallet TOML")?;
+    let legacy_index = raw.derivation_index.unwrap_or(0);
+    let wallet = TreasuryWalletConfig {
+        network: raw.network,
+        descriptor: raw.descriptor,
+        input_derivation_index: raw.input_derivation_index.unwrap_or(legacy_index),
+        change_derivation_index: raw
+            .change_derivation_index
+            .unwrap_or_else(|| legacy_index.saturating_add(1)),
+        signers: raw.signers,
+    };
     wallet.normalized()
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTreasuryWalletConfig {
+    #[serde(default = "default_network")]
+    network: String,
+    #[serde(default)]
+    descriptor: Option<String>,
+    #[serde(default)]
+    derivation_index: Option<u32>,
+    #[serde(default)]
+    input_derivation_index: Option<u32>,
+    #[serde(default)]
+    change_derivation_index: Option<u32>,
+    #[serde(default)]
+    signers: Vec<TreasurySigner>,
 }
 
 impl TreasuryWalletConfig {
@@ -68,7 +96,8 @@ impl TreasuryWalletConfig {
         Ok(Self {
             network: network_name(network).to_string(),
             descriptor,
-            derivation_index: self.derivation_index,
+            input_derivation_index: self.input_derivation_index,
+            change_derivation_index: self.change_derivation_index,
             signers,
         })
     }
@@ -177,6 +206,10 @@ fn default_network() -> String {
     "testnet".to_string()
 }
 
+fn default_change_derivation_index() -> u32 {
+    1
+}
+
 fn network_name(network: SpNetwork) -> &'static str {
     match network {
         SpNetwork::Mainnet => "bitcoin",
@@ -212,8 +245,33 @@ mod tests {
         .expect("wallet");
 
         assert_eq!(wallet.signers.len(), 2);
-        assert_eq!(wallet.derivation_index, 0);
+        assert_eq!(wallet.input_derivation_index, 0);
+        assert_eq!(wallet.change_derivation_index, 1);
         assert!(wallet.descriptor.unwrap().starts_with("tr(musig("));
+    }
+
+    #[test]
+    fn migrates_legacy_derivation_index() {
+        let wallet = parse_wallet(&format!(
+            r#"
+            network = "testnet"
+            derivation_index = 3
+
+            [[signers]]
+            xfp = "0f056943"
+            derivation_path = "m/48h/1h/0h/3h"
+            xpub = "{XPUB1}"
+
+            [[signers]]
+            xfp = "6ba6cfd0"
+            derivation_path = "m/48h/1h/0h/3h"
+            xpub = "{XPUB2}"
+            "#
+        ))
+        .expect("wallet");
+
+        assert_eq!(wallet.input_derivation_index, 3);
+        assert_eq!(wallet.change_derivation_index, 4);
     }
 
     #[test]
