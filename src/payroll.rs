@@ -22,6 +22,7 @@ pub struct TreasuryPrevout {
     pub txid: Txid,
     pub vout: u32,
     pub amount: Amount,
+    pub derivation_index: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +87,7 @@ pub fn build_initial_payroll_psbt(
         .ok_or_else(|| anyhow::anyhow!("change amount underflow"))?;
 
     let secp = Secp256k1::new();
-    let input_keys = derive_wallet_public_keys(&secp, &wallet, wallet.input_derivation_index)?;
+    let input_keys = derive_wallet_public_keys(&secp, &wallet, config.prevout.derivation_index)?;
     let change_keys = derive_wallet_public_keys(&secp, &wallet, wallet.change_derivation_index)?;
     let recipient_pairs = address_amounts(&recipients);
     let psbt = construct_initial_psbt(
@@ -113,6 +114,15 @@ pub fn build_initial_payroll_psbt(
         change_sat: change.to_sat(),
         descriptor,
     })
+}
+
+pub fn derive_treasury_script_pubkey(
+    wallet: &TreasuryWalletConfig,
+    derivation_index: u32,
+) -> Result<ScriptBuf> {
+    let wallet = wallet.normalized()?;
+    let secp = Secp256k1::new();
+    Ok(derive_wallet_public_keys(&secp, &wallet, derivation_index)?.p2tr_script)
 }
 
 struct WalletPublicKeys {
@@ -341,7 +351,7 @@ mod tests {
         let wallet = TreasuryWalletConfig {
             network: "testnet".to_string(),
             descriptor: None,
-            input_derivation_index: 0,
+            next_derivation_index: 0,
             change_derivation_index: 1,
             signers: vec![
                 TreasurySigner {
@@ -363,6 +373,7 @@ mod tests {
             .expect("txid"),
             vout: 7,
             amount: Amount::from_sat(10_000),
+            derivation_index: 0,
         };
 
         let result = build_initial_payroll_psbt(BuildInitialPayrollConfig::new(
@@ -431,9 +442,8 @@ mod tests {
         // and is keyed by the taproot internal key (the derived aggregate), with
         // the synthetic root fingerprint hash160(untweaked_agg_pk)[..4].
         let secp = Secp256k1::new();
-        let input_keys =
-            derive_wallet_public_keys(&secp, &wallet.normalized().expect("wallet"), 0)
-                .expect("keys");
+        let input_keys = derive_wallet_public_keys(&secp, &wallet.normalized().expect("wallet"), 0)
+            .expect("keys");
         let internal_key = psbt.inputs[0].tap_internal_key.expect("internal key");
         assert_eq!(internal_key, input_keys.plain_child_xonly);
         let (_, (agg_fp, agg_path)) = input_origins.get(&internal_key).expect("aggregate origin");

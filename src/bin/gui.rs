@@ -4,9 +4,9 @@ use bitcoincore_rpc::{Auth, Client, RpcApi};
 use psbt::Psbt as SilentPaymentPsbt;
 use serde::{Deserialize, Serialize};
 use silent_pay::{
-    build_initial_payroll_psbt, finalize_payroll, load_recipients, load_wallet, save_recipients,
-    save_wallet, BuildInitialPayrollConfig, RecipientEntry, TreasuryPrevout, TreasurySigner,
-    TreasuryWalletConfig,
+    build_initial_payroll_psbt, derive_treasury_script_pubkey, finalize_payroll, load_recipients,
+    load_wallet, save_recipients, save_wallet, BuildInitialPayrollConfig, RecipientEntry,
+    TreasuryPrevout, TreasurySigner, TreasuryWalletConfig,
 };
 use slint::{ComponentHandle, SharedString};
 use std::fs;
@@ -27,8 +27,9 @@ slint::slint! {
 
         in-out property <string> wallet_path: "testnet/wallet.toml";
         in-out property <string> wallet_network: "testnet";
-        in-out property <string> input_derivation_index: "0";
+        in-out property <string> next_derivation_index: "0";
         in-out property <string> change_derivation_index: "1";
+        in-out property <string> prevout_derivation_index: "0";
         in-out property <string> descriptor: "";
         in-out property <string> signer_table: "";
         in-out property <string> recipients_path: "testnet/recipients.toml";
@@ -87,8 +88,8 @@ slint::slint! {
                     spacing: 8px;
                     Text { text: "Network"; width: 110px; vertical-alignment: center; }
                     LineEdit { text <=> root.wallet_network; width: 130px; }
-                    Text { text: "Input Index"; width: 100px; vertical-alignment: center; }
-                    LineEdit { text <=> root.input_derivation_index; width: 90px; }
+                    Text { text: "Next Index"; width: 100px; vertical-alignment: center; }
+                    LineEdit { text <=> root.next_derivation_index; width: 90px; }
                     Text { text: "Change Index"; width: 110px; vertical-alignment: center; }
                     LineEdit { text <=> root.change_derivation_index; width: 90px; }
                 }
@@ -142,6 +143,8 @@ slint::slint! {
                     spacing: 8px;
                     Text { text: "Vout"; width: 110px; vertical-alignment: center; }
                     LineEdit { text <=> root.vout; width: 90px; }
+                    Text { text: "Prevout Index"; width: 110px; vertical-alignment: center; }
+                    LineEdit { text <=> root.prevout_derivation_index; width: 90px; }
                     Text { text: "Amount sat"; width: 110px; vertical-alignment: center; }
                     LineEdit { text <=> root.prevout_amount_sat; width: 170px; }
                     Text { text: "Fee sat"; width: 70px; vertical-alignment: center; }
@@ -190,6 +193,8 @@ slint::slint! {
                     spacing: 8px;
                     Text { text: "Vout"; width: 110px; vertical-alignment: center; }
                     LineEdit { text <=> root.vout; width: 90px; }
+                    Text { text: "Prevout Index"; width: 110px; vertical-alignment: center; }
+                    LineEdit { text <=> root.prevout_derivation_index; width: 90px; }
                     Text { text: "Amount sat"; width: 110px; vertical-alignment: center; }
                     LineEdit { text <=> root.prevout_amount_sat; width: 170px; }
                 }
@@ -279,7 +284,7 @@ fn load_wallet_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_wallet_path(path.display().to_string().into());
     let wallet = load_wallet(&path)?;
     ui.set_wallet_network(wallet.network.into());
-    ui.set_input_derivation_index(wallet.input_derivation_index.to_string().into());
+    ui.set_next_derivation_index(wallet.next_derivation_index.to_string().into());
     ui.set_change_derivation_index(wallet.change_derivation_index.to_string().into());
     ui.set_descriptor(wallet.descriptor.unwrap_or_default().into());
     ui.set_signer_table(format_signers(&wallet.signers).into());
@@ -352,7 +357,7 @@ fn load_prevout_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_txid(tracked.txid.into());
     ui.set_vout(tracked.vout.to_string().into());
     ui.set_prevout_amount_sat(tracked.amount_sat.to_string().into());
-    ui.set_input_derivation_index(tracked.derivation_index.to_string().into());
+    ui.set_prevout_derivation_index(tracked.derivation_index.to_string().into());
     ui.set_change_derivation_index(
         next_change_derivation_index(tracked.derivation_index)
             .to_string()
@@ -446,6 +451,10 @@ fn save_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
                 .parse()
                 .context("invalid prevout amount_sat")?,
         ),
+        derivation_index: parse_u32(
+            ui.get_prevout_derivation_index().as_str(),
+            "prevout derivation index",
+        )?,
     };
     let fee_sat = ui
         .get_miner_fee_sat()
@@ -489,6 +498,7 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
     let change = change_prevout_from_psbt(
         &result.final_psbt_path,
         &result.txid,
+        &wallet_from_ui(&ui)?,
         change_derivation_index,
     )?;
     let tracked_path = default_path_for_network(
@@ -504,7 +514,8 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
     ui.set_txid(result.txid.clone().into());
     ui.set_vout(change.vout.to_string().into());
     ui.set_prevout_amount_sat(change.amount_sat.to_string().into());
-    ui.set_input_derivation_index(change.derivation_index.to_string().into());
+    ui.set_prevout_derivation_index(change.derivation_index.to_string().into());
+    ui.set_next_derivation_index(next_change_derivation_index.to_string().into());
     ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
     ui.set_final_tx_hex_path(result.final_tx_hex_path.display().to_string().into());
     ui.set_finalize_summary(
@@ -577,7 +588,6 @@ struct TrackedPrevout {
     txid: String,
     vout: u32,
     amount_sat: u64,
-    #[serde(default)]
     derivation_index: u32,
 }
 
@@ -589,9 +599,9 @@ fn wallet_from_ui(ui: &PayrollGui) -> Result<TreasuryWalletConfig> {
     Ok(TreasuryWalletConfig {
         network: ui.get_wallet_network().to_string(),
         descriptor,
-        input_derivation_index: parse_u32(
-            ui.get_input_derivation_index().as_str(),
-            "input derivation index",
+        next_derivation_index: parse_u32(
+            ui.get_next_derivation_index().as_str(),
+            "next derivation index",
         )?,
         change_derivation_index: parse_u32(
             ui.get_change_derivation_index().as_str(),
@@ -636,8 +646,8 @@ fn tracked_prevout_from_ui(ui: &PayrollGui) -> Result<TrackedPrevout> {
             .parse()
             .context("invalid prevout amount_sat")?,
         derivation_index: parse_u32(
-            ui.get_input_derivation_index().as_str(),
-            "input derivation index",
+            ui.get_prevout_derivation_index().as_str(),
+            "prevout derivation index",
         )?,
     })
 }
@@ -664,22 +674,24 @@ fn save_tracked_prevout(path: impl AsRef<Path>, tracked: &TrackedPrevout) -> Res
 fn change_prevout_from_psbt(
     path: impl AsRef<Path>,
     txid: &str,
+    wallet: &TreasuryWalletConfig,
     derivation_index: u32,
 ) -> Result<TrackedPrevout> {
     let path = path.as_ref();
     let bytes =
         fs::read(path).with_context(|| format!("failed to read PSBT {}", path.display()))?;
     let psbt = SilentPaymentPsbt::deserialize(&bytes).context("failed to parse final PSBT")?;
+    let change_script = derive_treasury_script_pubkey(wallet, derivation_index)?;
     let change = psbt
         .outputs
         .iter()
         .enumerate()
-        .filter(|(_, output)| output.sp_v0_info.is_none())
+        .filter(|(_, output)| output.script_pubkey == change_script)
         .map(|(vout, output)| (vout, output.amount.to_sat()))
         .collect::<Vec<_>>();
     if change.len() != 1 {
         bail!(
-            "expected exactly one change output in final PSBT, found {}",
+            "expected exactly one output matching change derivation index {derivation_index}, found {}",
             change.len()
         );
     }
@@ -698,8 +710,8 @@ fn parse_u32(value: &str, label: &str) -> Result<u32> {
     value.parse().with_context(|| format!("invalid {label}"))
 }
 
-fn next_change_derivation_index(input_derivation_index: u32) -> u32 {
-    input_derivation_index.saturating_add(1)
+fn next_change_derivation_index(prevout_derivation_index: u32) -> u32 {
+    prevout_derivation_index.saturating_add(1)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

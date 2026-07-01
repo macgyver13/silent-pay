@@ -8,8 +8,8 @@ pub mod wallet;
 
 pub use finalize::{finalize_payroll, FinalizePayrollResult};
 pub use payroll::{
-    build_initial_payroll_psbt, BuildInitialPayrollConfig, BuildInitialPayrollResult,
-    TreasuryPrevout,
+    build_initial_payroll_psbt, derive_treasury_script_pubkey, BuildInitialPayrollConfig,
+    BuildInitialPayrollResult, TreasuryPrevout,
 };
 pub use recipients::{
     load_recipients, save_recipients, PayrollRecipient, RecipientConfig, RecipientEntry,
