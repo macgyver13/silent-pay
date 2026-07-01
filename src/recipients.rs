@@ -38,16 +38,19 @@ pub fn load_recipients(path: impl AsRef<Path>) -> Result<Vec<PayrollRecipient>> 
 }
 
 pub fn save_recipients(path: impl AsRef<Path>, recipients: &[RecipientEntry]) -> Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+    }
     let config = RecipientConfig {
         recipients: recipients.to_vec(),
     };
     parse_recipients(&toml::to_string(&config)?)?;
-    fs::write(path.as_ref(), toml::to_string_pretty(&config)?).with_context(|| {
-        format!(
-            "failed to write recipients config {}",
-            path.as_ref().display()
-        )
-    })
+    fs::write(path, toml::to_string_pretty(&config)?)
+        .with_context(|| format!("failed to write recipients config {}", path.display()))
 }
 
 pub fn parse_recipients(contents: &str) -> Result<Vec<PayrollRecipient>> {

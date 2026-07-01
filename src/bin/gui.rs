@@ -25,18 +25,19 @@ slint::slint! {
         max-width: 4096px;
         max-height: 4096px;
 
-        in-out property <string> wallet_path: "wallet.toml";
+        in-out property <string> wallet_path: "testnet/wallet.toml";
         in-out property <string> wallet_network: "testnet";
         in-out property <string> input_derivation_index: "0";
         in-out property <string> change_derivation_index: "1";
         in-out property <string> descriptor: "";
         in-out property <string> signer_table: "";
-        in-out property <string> recipients_path: "recipients.toml";
+        in-out property <string> recipients_path: "testnet/recipients.toml";
         in-out property <string> recipient_rows: "";
         in-out property <string> txid: "";
         in-out property <string> vout: "0";
         in-out property <string> prevout_amount_sat: "";
-        in-out property <string> prevout_path: "output/tracked-prevout.toml";
+        in-out property <string> miner_fee_sat: "1000";
+        in-out property <string> prevout_path: "testnet/tracked-prevout.toml";
         in-out property <string> psbt_path: "output/payroll.psbt";
         in-out property <int> active_tab: 0;
         in-out property <string> finalize_psbt_path: "output/pay/musig2-sp-cosigner-contrib.psbt";
@@ -143,6 +144,8 @@ slint::slint! {
                     LineEdit { text <=> root.vout; width: 90px; }
                     Text { text: "Amount sat"; width: 110px; vertical-alignment: center; }
                     LineEdit { text <=> root.prevout_amount_sat; width: 170px; }
+                    Text { text: "Fee sat"; width: 70px; vertical-alignment: center; }
+                    LineEdit { text <=> root.miner_fee_sat; width: 130px; }
                 }
                 HorizontalLayout {
                     spacing: 8px;
@@ -268,7 +271,13 @@ fn main() -> Result<()> {
 
 fn load_wallet_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
-    let wallet = load_wallet(ui.get_wallet_path().as_str())?;
+    let path = default_path_for_network(
+        ui.get_wallet_network().as_str(),
+        ui.get_wallet_path().as_str(),
+        "wallet.toml",
+    );
+    ui.set_wallet_path(path.display().to_string().into());
+    let wallet = load_wallet(&path)?;
     ui.set_wallet_network(wallet.network.into());
     ui.set_input_derivation_index(wallet.input_derivation_index.to_string().into());
     ui.set_change_derivation_index(wallet.change_derivation_index.to_string().into());
@@ -280,8 +289,14 @@ fn load_wallet_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
 fn save_wallet_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
     let wallet = wallet_from_ui(&ui)?;
-    save_wallet(ui.get_wallet_path().as_str(), &wallet)?;
-    let wallet = load_wallet(ui.get_wallet_path().as_str())?;
+    let path = default_path_for_network(
+        wallet.network.as_str(),
+        ui.get_wallet_path().as_str(),
+        "wallet.toml",
+    );
+    ui.set_wallet_path(path.display().to_string().into());
+    save_wallet(&path, &wallet)?;
+    let wallet = load_wallet(&path)?;
     ui.set_descriptor(wallet.descriptor.unwrap_or_default().into());
     ui.set_signer_table(format_signers(&wallet.signers).into());
     Ok("Saved wallet".to_string())
@@ -289,7 +304,13 @@ fn save_wallet_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
 
 fn load_recipients_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
-    let recipients = load_recipients(ui.get_recipients_path().as_str())?;
+    let path = default_path_for_network(
+        ui.get_wallet_network().as_str(),
+        ui.get_recipients_path().as_str(),
+        "recipients.toml",
+    );
+    ui.set_recipients_path(path.display().to_string().into());
+    let recipients = load_recipients(&path)?;
     let rows = recipients
         .iter()
         .map(|recipient| {
@@ -309,13 +330,25 @@ fn load_recipients_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
 fn save_recipients_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
     let recipients = recipient_rows(ui.get_recipient_rows().as_str())?;
-    save_recipients(ui.get_recipients_path().as_str(), &recipients)?;
+    let path = default_path_for_network(
+        ui.get_wallet_network().as_str(),
+        ui.get_recipients_path().as_str(),
+        "recipients.toml",
+    );
+    ui.set_recipients_path(path.display().to_string().into());
+    save_recipients(&path, &recipients)?;
     Ok("Saved recipients".to_string())
 }
 
 fn load_prevout_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
-    let tracked = load_tracked_prevout(ui.get_prevout_path().as_str())?;
+    let path = default_path_for_network(
+        ui.get_wallet_network().as_str(),
+        ui.get_prevout_path().as_str(),
+        "tracked-prevout.toml",
+    );
+    ui.set_prevout_path(path.display().to_string().into());
+    let tracked = load_tracked_prevout(&path)?;
     ui.set_txid(tracked.txid.into());
     ui.set_vout(tracked.vout.to_string().into());
     ui.set_prevout_amount_sat(tracked.amount_sat.to_string().into());
@@ -326,7 +359,13 @@ fn load_prevout_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
 fn save_prevout_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
     let tracked = tracked_prevout_from_ui(&ui)?;
-    save_tracked_prevout(ui.get_prevout_path().as_str(), &tracked)?;
+    let path = default_path_for_network(
+        ui.get_wallet_network().as_str(),
+        ui.get_prevout_path().as_str(),
+        "tracked-prevout.toml",
+    );
+    ui.set_prevout_path(path.display().to_string().into());
+    save_tracked_prevout(&path, &tracked)?;
     Ok("Saved tracked prevout".to_string())
 }
 
@@ -347,7 +386,13 @@ fn read_final_txid_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_txid(txid.clone().into());
 
     if let Ok(tracked) = tracked_prevout_from_ui(&ui) {
-        save_tracked_prevout(ui.get_prevout_path().as_str(), &tracked)?;
+        let tracked_path = default_path_for_network(
+            ui.get_wallet_network().as_str(),
+            ui.get_prevout_path().as_str(),
+            "tracked-prevout.toml",
+        );
+        ui.set_prevout_path(tracked_path.display().to_string().into());
+        save_tracked_prevout(&tracked_path, &tracked)?;
         Ok(format!(
             "Read txid from {} and saved tracked prevout",
             path.display()
@@ -379,7 +424,13 @@ fn save_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
 
     let wallet = wallet_from_ui(&ui)?;
     let recipients = recipient_rows(ui.get_recipient_rows().as_str())?;
-    save_recipients(ui.get_recipients_path().as_str(), &recipients)?;
+    let recipients_path = default_path_for_network(
+        wallet.network.as_str(),
+        ui.get_recipients_path().as_str(),
+        "recipients.toml",
+    );
+    ui.set_recipients_path(recipients_path.display().to_string().into());
+    save_recipients(&recipients_path, &recipients)?;
 
     let prevout = TreasuryPrevout {
         txid: Txid::from_str(ui.get_txid().as_str()).context("invalid txid")?,
@@ -391,18 +442,21 @@ fn save_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
                 .context("invalid prevout amount_sat")?,
         ),
     };
-    let result = build_initial_payroll_psbt(BuildInitialPayrollConfig::new(
-        wallet,
-        ui.get_recipients_path().as_str(),
-        prevout,
-        &psbt_path,
-    ))?;
+    let fee_sat = ui
+        .get_miner_fee_sat()
+        .as_str()
+        .parse()
+        .context("invalid miner fee_sat")?;
+    let mut config = BuildInitialPayrollConfig::new(wallet, &recipients_path, prevout, &psbt_path);
+    config.fee = Amount::from_sat(fee_sat);
+    let result = build_initial_payroll_psbt(config)?;
 
     Ok(format!(
-        "Saved {} with {} recipients, {} sat outputs, {} sat change",
+        "Saved {} with {} recipients, {} sat outputs, {} sat fee, {} sat change",
         result.psbt_path.display(),
         result.recipient_count,
         result.total_output_sat,
+        fee_sat,
         result.change_sat
     ))
 }
@@ -432,7 +486,13 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
         &result.txid,
         change_derivation_index,
     )?;
-    save_tracked_prevout(ui.get_prevout_path().as_str(), &change)?;
+    let tracked_path = default_path_for_network(
+        ui.get_wallet_network().as_str(),
+        ui.get_prevout_path().as_str(),
+        "tracked-prevout.toml",
+    );
+    ui.set_prevout_path(tracked_path.display().to_string().into());
+    save_tracked_prevout(&tracked_path, &change)?;
     let next_change_derivation_index = change.derivation_index.saturating_add(1);
 
     ui.set_final_txid(result.txid.clone().into());
@@ -451,7 +511,7 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
             change.amount_sat,
             change.derivation_index,
             next_change_derivation_index,
-            ui.get_prevout_path(),
+            tracked_path.display(),
             result.final_psbt_path.display(),
             result.final_tx_hex_path.display()
         )
@@ -563,7 +623,7 @@ fn tracked_prevout_from_ui(ui: &PayrollGui) -> Result<TrackedPrevout> {
     let txid = ui.get_txid().trim().to_string();
     Txid::from_str(&txid).context("invalid txid")?;
     Ok(TrackedPrevout {
-        txid,
+        txid: txid.as_str().to_string(),
         vout: ui.get_vout().as_str().parse().context("invalid vout")?,
         amount_sat: ui
             .get_prevout_amount_sat()
@@ -658,6 +718,42 @@ fn classify_psbt_save_path(value: &str) -> PsbtSavePath {
     PsbtSavePath::NeedsDialog { directory }
 }
 
+fn default_path_for_network(network: &str, current_path: &str, file_name: &str) -> PathBuf {
+    let current = PathBuf::from(current_path.trim());
+    let Some(directory) = default_network_directory(network) else {
+        return current;
+    };
+    if is_default_file_path(&current, file_name) {
+        return PathBuf::from(directory).join(file_name);
+    }
+    current
+}
+
+fn default_network_directory(network: &str) -> Option<&'static str> {
+    let network = network.to_lowercase();
+    if network.contains("testnet") {
+        Some("testnet")
+    } else if network.contains("mainnet") || network.contains("bitcoin") {
+        Some("mainnet")
+    } else {
+        None
+    }
+}
+
+fn is_default_file_path(path: &Path, file_name: &str) -> bool {
+    if path == Path::new(file_name) {
+        return true;
+    }
+    if file_name == "tracked-prevout.toml" && path == Path::new("output").join(file_name) {
+        return true;
+    }
+    path.parent()
+        .and_then(Path::file_name)
+        .and_then(|parent| parent.to_str())
+        .is_some_and(|parent| parent == "testnet" || parent == "mainnet")
+        && path.file_name().and_then(|name| name.to_str()) == Some(file_name)
+}
+
 fn txid_from_hex_file(path: impl AsRef<Path>) -> Result<String> {
     let path = path.as_ref();
     let tx_hex = fs::read_to_string(path)
@@ -739,6 +835,54 @@ mod tests {
             PsbtSavePath::NeedsDialog {
                 directory: PathBuf::from("output")
             }
+        );
+    }
+
+    #[test]
+    fn testnet_network_uses_testnet_default_paths() {
+        assert_eq!(
+            default_path_for_network("bitcoin-testnet4", "wallet.toml", "wallet.toml"),
+            PathBuf::from("testnet/wallet.toml")
+        );
+        assert_eq!(
+            default_path_for_network("testnet", "recipients.toml", "recipients.toml"),
+            PathBuf::from("testnet/recipients.toml")
+        );
+        assert_eq!(
+            default_path_for_network(
+                "testnet",
+                "output/tracked-prevout.toml",
+                "tracked-prevout.toml"
+            ),
+            PathBuf::from("testnet/tracked-prevout.toml")
+        );
+    }
+
+    #[test]
+    fn mainnet_network_uses_mainnet_default_paths() {
+        assert_eq!(
+            default_path_for_network("mainnet", "wallet.toml", "wallet.toml"),
+            PathBuf::from("mainnet/wallet.toml")
+        );
+        assert_eq!(
+            default_path_for_network("bitcoin", "recipients.toml", "recipients.toml"),
+            PathBuf::from("mainnet/recipients.toml")
+        );
+    }
+
+    #[test]
+    fn explicit_custom_paths_are_preserved() {
+        assert_eq!(
+            default_path_for_network("testnet", "archive/wallet.toml", "wallet.toml"),
+            PathBuf::from("archive/wallet.toml")
+        );
+    }
+
+    #[test]
+    fn existing_network_default_paths_can_switch_networks() {
+        assert_eq!(
+            default_path_for_network("mainnet", "testnet/wallet.toml", "wallet.toml"),
+            PathBuf::from("mainnet/wallet.toml")
         );
     }
 }

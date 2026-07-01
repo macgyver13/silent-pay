@@ -36,9 +36,16 @@ pub fn load_wallet(path: impl AsRef<Path>) -> Result<TreasuryWalletConfig> {
 }
 
 pub fn save_wallet(path: impl AsRef<Path>, wallet: &TreasuryWalletConfig) -> Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+    }
     let normalized = wallet.normalized()?;
-    fs::write(path.as_ref(), toml::to_string_pretty(&normalized)?)
-        .with_context(|| format!("failed to write wallet config {}", path.as_ref().display()))
+    fs::write(path, toml::to_string_pretty(&normalized)?)
+        .with_context(|| format!("failed to write wallet config {}", path.display()))
 }
 
 pub fn parse_wallet(contents: &str) -> Result<TreasuryWalletConfig> {
