@@ -16,7 +16,6 @@ use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 
 use bip375_helpers::transaction::build_psbt;
 use psbt::core::utils::to_psbt_dleq;
-use psbt::roles::Bip375UpdaterExt;
 use psbt::roles::{ExtractorPsbtExt, InputWitnessFinalizerPsbtExt};
 use psbt::{generate_dleq_proof, verify_dleq_proof, Psbt};
 use psbt_v2::v2::{Input, Output};
@@ -262,14 +261,13 @@ pub fn construct_psbt(
         &keys.untweaked_agg_pk,
         &[keys.alice_pk, keys.bob_pk, keys.charlie_pk],
     );
-    let synthetic_path: bitcoin::bip32::DerivationPath = [0, DEMO_SP_INDEX]
-        .iter()
-        .map(|&n| bitcoin::bip32::ChildNumber::from(n))
-        .collect();
-    psbt.inputs[0].set_sp_spend_bip32_derivation(
-        bitcoin::CompressedPublicKey(keys.untweaked_agg_pk),
-        bitcoin::bip32::Fingerprint::default(),
-        synthetic_path,
+    // The aggregate MuSig2 key's [0, DEMO_SP_INDEX] child-derivation path is stored
+    // as a TAP_BIP32_DERIVATION entry (BIP-373), not the BIP-376 SP-spend field.
+    // The finalizer reads it back to re-derive the aggregate child for ECDH.
+    psbt_fields::set_input_musig2_agg_derivation(
+        &mut psbt.inputs[0],
+        &keys.untweaked_agg_pk,
+        DEMO_SP_INDEX,
     );
 
     // BIP-373: tag the change output (the non-SP output) with the participant

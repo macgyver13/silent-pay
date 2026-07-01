@@ -36,7 +36,7 @@ pub fn build_key_agg_ctx(participants: &[PublicKey]) -> Result<KeyAggContext> {
     // so the aggregator must sort to reproduce the same aggregate key the wallet
     // committed to.
     let mut sorted = participants.to_vec();
-    sorted.sort_by(|a, b| a.serialize().cmp(&b.serialize()));
+    sorted.sort_by_key(|k| k.serialize());
 
     let points: Vec<musig2::secp256k1::PublicKey> =
         sorted.iter().map(to_musig2_pubkey).collect::<Result<_>>()?;

@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use super::finalizer::input_hash_bytes;
 use super::keyagg;
 use crate::musig2_psbt::{
-    get_input_musig2_participant_pubkeys, get_input_partial_ecdh_shares, get_input_sp_spend_path,
+    get_input_musig2_agg_path, get_input_musig2_participant_pubkeys, get_input_partial_ecdh_shares,
     get_output_sp_info, input_outpoint_bytes,
 };
 use psbt::Psbt;
@@ -217,7 +217,7 @@ fn synthesize_partial_ecdh_shares(
                         "incomplete or unknown MuSig2 contributors on input {input_idx}"
                     ));
                 }
-                let path = get_input_sp_spend_path(input).unwrap_or_else(|| vec![0, 0]);
+                let path = get_input_musig2_agg_path(input);
                 let contributions: Vec<(PublicKey, PublicKey)> =
                     entries.iter().map(|(c, s, _)| (*c, *s)).collect();
                 keyagg::aggregate_partial_ecdh_shares(

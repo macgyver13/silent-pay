@@ -295,18 +295,6 @@ fn add_payroll_tap_derivations(psbt: &mut SilentPaymentPsbt, keys: &KeySetup) ->
         let (xonly, _) = participant_pk.x_only_public_key();
         add_tap_derivation(psbt, change_idx, &xonly, cosigner.xfp, &BIP48_ACCOUNT_PATH);
     }
-
-    let mut agg_xfp = [0u8; 4];
-    use bitcoin::hashes::{hash160, Hash};
-    let agg_hash = hash160::Hash::hash(&keys.untweaked_agg_pk.serialize());
-    agg_xfp.copy_from_slice(&agg_hash[..4]);
-    add_tap_derivation(
-        psbt,
-        change_idx,
-        &keys.untweaked_agg_xonly,
-        agg_xfp,
-        &[0, workflow::DEMO_SP_INDEX],
-    );
     Ok(())
 }
 

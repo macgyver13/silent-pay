@@ -14,11 +14,13 @@
 //!   `scan_key(33) || contributor_pk(33)`, value `share(33)` / `proof(64)`.
 
 use anyhow::{anyhow, bail, Result};
+use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
+use bitcoin::hashes::{hash160, Hash};
 use bitcoin::CompressedPublicKey;
 use psbt_v2::raw::Key;
 use psbt_v2::v2::dleq::DleqProof;
 use psbt_v2::v2::{Input, Output};
-use secp256k1::PublicKey;
+use secp256k1::{PublicKey, XOnlyPublicKey};
 
 /// Proposed BIP-375 extension keytype: per-party MuSig2 partial ECDH share.
 pub const PSBT_IN_MUSIG2_PARTIAL_ECDH_SHARE: u64 = 0x21;
@@ -274,12 +276,47 @@ pub fn get_output_sp_info(output: &Output) -> Result<Option<(PublicKey, PublicKe
     Ok(Some((scan_key, spend_key)))
 }
 
-/// BIP-328 derivation path carried on the input's native SP-spend derivation field,
-/// if present. The MuSig2 demo defaults to `[0, 0]` when absent.
-pub fn get_input_sp_spend_path(input: &Input) -> Option<Vec<u32>> {
-    use psbt::roles::Bip375UpdaterExt;
-    let (_pubkey, _fingerprint, path) = input.get_sp_spend_bip32_derivation()?;
-    Some(path.into_iter().map(|c| u32::from(*c)).collect())
+/// Synthetic master fingerprint for a MuSig2 aggregate key. The aggregate has no
+/// real BIP-32 master, so `hash160(agg_pk)[..4]` gives a stable placeholder for
+/// the TAP_BIP32_DERIVATION key origin.
+pub fn musig2_agg_fingerprint(agg_pk: &PublicKey) -> Fingerprint {
+    let hash = hash160::Hash::hash(&agg_pk.serialize());
+    let mut fp = [0u8; 4];
+    fp.copy_from_slice(&hash[..4]);
+    Fingerprint::from(fp)
+}
+
+/// Record the aggregate MuSig2 key's `[0, index]` synthetic child-derivation path
+/// on an input as a TAP_BIP32_DERIVATION entry (BIP-373).
+///
+/// The entry is keyed by `derived_xonly` — the synthetically-derived aggregate
+/// child (the taproot internal key `der_agg_k`) — because that is where a signer
+/// (e.g. Coldcard) looks up the path via the internal key. The origin fingerprint
+/// is that of the untweaked aggregate `agg_pk`, which is the synthetic node's root
+/// (`hash160(agg_pk)[..4]`); the path descends from that root. The finalizer reads
+/// it back via [`get_input_musig2_agg_path`] to re-derive the aggregate for ECDH.
+pub fn set_input_musig2_agg_derivation(
+    input: &mut Input,
+    agg_pk: &PublicKey,
+    derived_xonly: XOnlyPublicKey,
+    index: u32,
+) {
+    let path: DerivationPath = [0, index].iter().map(|&n| ChildNumber::from(n)).collect();
+    input.tap_key_origins.insert(
+        derived_xonly,
+        (Vec::new(), (musig2_agg_fingerprint(agg_pk), path)),
+    );
+}
+
+/// Read the aggregate MuSig2 key's `[0, index]` synthetic child-derivation path
+/// from the input's TAP_BIP32_DERIVATION entries, keyed by the taproot internal
+/// key (the derived aggregate `der_agg_k`). Defaults to `[0, 0]` when absent.
+pub fn get_input_musig2_agg_path(input: &Input) -> Vec<u32> {
+    input
+        .tap_internal_key
+        .and_then(|xonly| input.tap_key_origins.get(&xonly))
+        .map(|(_, (_, path))| path.into_iter().map(|c| u32::from(*c)).collect())
+        .unwrap_or_else(|| vec![0, 0])
 }
 
 /// BIP-352 outpoint bytes: `txid (internal byte order, 32) || vout (LE, 4)`.
