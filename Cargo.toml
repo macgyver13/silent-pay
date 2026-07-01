@@ -1,0 +1,39 @@
+[package]
+name = "silent-pay"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+bip375-helpers = { path = "/Users/ron/src/bip375-examples/rust/crates/bip375-helpers" }
+bip39 = "2.0"
+bitcoin = "0.32.6"
+hex = "0.4"
+hmac = "0.12"
+musig2 = { version = "0.3.1", features = ["secp256k1"] }
+psbt = { path = "/Users/ron/src/spdk/psbt" }
+psbt-v2 = { path = "/Users/ron/src/rust-psbt", features = ["musig2", "silent-payments"] }
+rfd = "0.15.4"
+secp256k1 = { version = "0.29", features = ["rand", "global-context", "serde"] }
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
+slint = "1.16.1"
+silentpayments = { path = "/Users/ron/src/spdk/silentpayments" }
+toml = "0.9.12"
+
+[[bin]]
+name = "payroll"
+path = "src/bin/build_payroll.rs"
+
+[[bin]]
+name = "finalize"
+path = "src/bin/finalize_payroll.rs"
+
+[[bin]]
+name = "scan_recipients"
+path = "src/bin/scan_recipients.rs"
+
+[[bin]]
+name = "gui"
+path = "src/bin/gui.rs"
