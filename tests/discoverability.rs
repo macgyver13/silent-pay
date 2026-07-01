@@ -2,7 +2,7 @@ use bitcoin::Amount;
 use psbt::roles::signer::extract_eligible_input_pubkey;
 use secp256k1::{PublicKey, Secp256k1, XOnlyPublicKey};
 use silent_pay::musig2_psbt::PSBT_IN_MUSIG2_PARTIAL_DLEQ;
-use silent_pay::recipients::{address_amounts, load_recipients, recipient_keys};
+use silent_pay::recipients::{address_amounts, parse_recipients, recipient_keys};
 use silent_pay::workflow;
 use silentpayments::receiving::{Label, Receiver};
 use silentpayments::utils::receiving::PublicTweakData;
@@ -13,7 +13,20 @@ use silentpayments::{Network, SpVersion, TransactionInputs, TransactionSharedSec
 fn sp_outputs_discoverable_by_recipients() {
     let secp = Secp256k1::new();
     let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX).expect("key setup");
-    let recipients = load_recipients("recipients.toml").expect("recipient config");
+    let recipients = parse_recipients(
+        r#"
+        [[recipients]]
+        label = "alice"
+        amount_sat = 1000
+        seed_hex = "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+
+        [[recipients]]
+        label = "bob"
+        amount_sat = 2000
+        seed_hex = "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
+        "#,
+    )
+    .expect("recipient config");
     let recipient_pairs = address_amounts(&recipients);
 
     let mut psbt = workflow::construct_psbt(&keys, &recipient_pairs).expect("construct");

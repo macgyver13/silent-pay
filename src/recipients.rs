@@ -42,8 +42,12 @@ pub fn save_recipients(path: impl AsRef<Path>, recipients: &[RecipientEntry]) ->
         recipients: recipients.to_vec(),
     };
     parse_recipients(&toml::to_string(&config)?)?;
-    fs::write(path.as_ref(), toml::to_string_pretty(&config)?)
-        .with_context(|| format!("failed to write recipients config {}", path.as_ref().display()))
+    fs::write(path.as_ref(), toml::to_string_pretty(&config)?).with_context(|| {
+        format!(
+            "failed to write recipients config {}",
+            path.as_ref().display()
+        )
+    })
 }
 
 pub fn parse_recipients(contents: &str) -> Result<Vec<PayrollRecipient>> {
@@ -124,7 +128,7 @@ fn parse_seed(seed_hex: &str) -> Result<[u8; 32]> {
 pub fn address_amounts(recipients: &[PayrollRecipient]) -> Vec<(SilentPaymentAddress, Amount)> {
     recipients
         .iter()
-        .map(|recipient| (recipient.address.clone(), recipient.amount))
+        .map(|recipient| (recipient.address, recipient.amount))
         .collect()
 }
 

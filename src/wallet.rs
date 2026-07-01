@@ -40,7 +40,8 @@ pub fn save_wallet(path: impl AsRef<Path>, wallet: &TreasuryWalletConfig) -> Res
 }
 
 pub fn parse_wallet(contents: &str) -> Result<TreasuryWalletConfig> {
-    let wallet: TreasuryWalletConfig = toml::from_str(contents).context("failed to parse wallet TOML")?;
+    let wallet: TreasuryWalletConfig =
+        toml::from_str(contents).context("failed to parse wallet TOML")?;
     wallet.normalized()
 }
 
@@ -59,7 +60,8 @@ impl TreasuryWalletConfig {
             bail!("N-of-N MuSig2 wallet requires at least two signers");
         }
         for (idx, signer) in signers.iter().enumerate() {
-            signer.validate(network)
+            signer
+                .validate(network)
                 .with_context(|| format!("signer[{idx}] is invalid"))?;
         }
         let descriptor = Some(descriptor_from_signers(&signers));
@@ -76,7 +78,10 @@ impl TreasuryWalletConfig {
     }
 
     pub fn descriptor_string(&self) -> Result<String> {
-        Ok(self.normalized()?.descriptor.expect("normalized descriptor"))
+        Ok(self
+            .normalized()?
+            .descriptor
+            .expect("normalized descriptor"))
     }
 }
 
@@ -128,7 +133,9 @@ fn parse_descriptor_signers(descriptor: &str) -> Result<Vec<TreasurySigner>> {
     let body = descriptor
         .strip_prefix("tr(musig(")
         .and_then(|s| s.strip_suffix(")/0/*)"))
-        .ok_or_else(|| anyhow::anyhow!("descriptor must look like tr(musig([xfp/path]xpub,...)/0/*)"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("descriptor must look like tr(musig([xfp/path]xpub,...)/0/*)")
+        })?;
     body.split(',')
         .enumerate()
         .map(|(idx, part)| parse_descriptor_signer(idx, part.trim()))
@@ -211,11 +218,12 @@ mod tests {
 
     #[test]
     fn parses_descriptor() {
-        let descriptor = format!(
-            "tr(musig([0f056943/48h/1h/0h/3h]{XPUB1},[6ba6cfd0/48h/1h/0h/3h]{XPUB2})/0/*)"
-        );
-        let wallet = parse_wallet(&format!("network = \"testnet\"\ndescriptor = \"{descriptor}\"\n"))
-            .expect("wallet");
+        let descriptor =
+            format!("tr(musig([0f056943/48h/1h/0h/3h]{XPUB1},[6ba6cfd0/48h/1h/0h/3h]{XPUB2})/0/*)");
+        let wallet = parse_wallet(&format!(
+            "network = \"testnet\"\ndescriptor = \"{descriptor}\"\n"
+        ))
+        .expect("wallet");
         assert_eq!(wallet.signers.len(), 2);
     }
 
