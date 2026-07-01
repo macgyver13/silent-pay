@@ -351,7 +351,7 @@ mod tests {
         let wallet = TreasuryWalletConfig {
             network: "testnet".to_string(),
             descriptor: None,
-            next_derivation_index: 0,
+            last_derivation_index: 0,
             change_derivation_index: 1,
             signers: vec![
                 TreasurySigner {

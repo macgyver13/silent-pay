@@ -14,7 +14,7 @@ pub struct TreasuryWalletConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor: Option<String>,
     #[serde(default)]
-    pub next_derivation_index: u32,
+    pub last_derivation_index: u32,
     #[serde(default = "default_change_derivation_index")]
     pub change_derivation_index: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -54,10 +54,10 @@ pub fn parse_wallet(contents: &str) -> Result<TreasuryWalletConfig> {
     let wallet = TreasuryWalletConfig {
         network: raw.network,
         descriptor: raw.descriptor,
-        next_derivation_index: raw.next_derivation_index,
+        last_derivation_index: raw.last_derivation_index,
         change_derivation_index: raw
             .change_derivation_index
-            .unwrap_or_else(|| raw.next_derivation_index.saturating_add(1)),
+            .unwrap_or_else(|| raw.last_derivation_index.saturating_add(1)),
         signers: raw.signers,
     };
     wallet.normalized()
@@ -70,7 +70,7 @@ struct RawTreasuryWalletConfig {
     #[serde(default)]
     descriptor: Option<String>,
     #[serde(default)]
-    next_derivation_index: u32,
+    last_derivation_index: u32,
     #[serde(default)]
     change_derivation_index: Option<u32>,
     #[serde(default)]
@@ -100,7 +100,7 @@ impl TreasuryWalletConfig {
         Ok(Self {
             network: network_name(network).to_string(),
             descriptor,
-            next_derivation_index: self.next_derivation_index,
+            last_derivation_index: self.last_derivation_index,
             change_derivation_index: self.change_derivation_index,
             signers,
         })
@@ -249,7 +249,7 @@ mod tests {
         .expect("wallet");
 
         assert_eq!(wallet.signers.len(), 2);
-        assert_eq!(wallet.next_derivation_index, 0);
+        assert_eq!(wallet.last_derivation_index, 0);
         assert_eq!(wallet.change_derivation_index, 1);
         assert!(wallet.descriptor.unwrap().starts_with("tr(musig("));
     }
@@ -259,7 +259,7 @@ mod tests {
         let wallet = parse_wallet(&format!(
             r#"
             network = "testnet"
-            next_derivation_index = 3
+            last_derivation_index = 3
             change_derivation_index = 4
 
             [[signers]]
@@ -275,7 +275,7 @@ mod tests {
         ))
         .expect("wallet");
 
-        assert_eq!(wallet.next_derivation_index, 3);
+        assert_eq!(wallet.last_derivation_index, 3);
         assert_eq!(wallet.change_derivation_index, 4);
     }
 
