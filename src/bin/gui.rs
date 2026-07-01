@@ -353,6 +353,11 @@ fn load_prevout_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_vout(tracked.vout.to_string().into());
     ui.set_prevout_amount_sat(tracked.amount_sat.to_string().into());
     ui.set_input_derivation_index(tracked.derivation_index.to_string().into());
+    ui.set_change_derivation_index(
+        next_change_derivation_index(tracked.derivation_index)
+            .to_string()
+            .into(),
+    );
     Ok("Loaded tracked prevout".to_string())
 }
 
@@ -493,7 +498,7 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
     );
     ui.set_prevout_path(tracked_path.display().to_string().into());
     save_tracked_prevout(&tracked_path, &change)?;
-    let next_change_derivation_index = change.derivation_index.saturating_add(1);
+    let next_change_derivation_index = next_change_derivation_index(change.derivation_index);
 
     ui.set_final_txid(result.txid.clone().into());
     ui.set_txid(result.txid.clone().into());
@@ -693,6 +698,10 @@ fn parse_u32(value: &str, label: &str) -> Result<u32> {
     value.parse().with_context(|| format!("invalid {label}"))
 }
 
+fn next_change_derivation_index(input_derivation_index: u32) -> u32 {
+    input_derivation_index.saturating_add(1)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PsbtSavePath {
     Direct(PathBuf),
@@ -884,5 +893,10 @@ mod tests {
             default_path_for_network("mainnet", "testnet/wallet.toml", "wallet.toml"),
             PathBuf::from("mainnet/wallet.toml")
         );
+    }
+
+    #[test]
+    fn loaded_prevout_advances_change_derivation_index() {
+        assert_eq!(next_change_derivation_index(7), 8);
     }
 }
