@@ -1,6 +1,7 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::{Address, Amount, Network, Transaction, Txid};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
+use copypasta::{ClipboardContext, ClipboardProvider};
 use psbt::Psbt as SilentPaymentPsbt;
 use serde::{Deserialize, Serialize};
 use silent_pay::{
@@ -10,6 +11,7 @@ use silent_pay::{
 };
 use silentpayments::Network as SpNetwork;
 use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -29,6 +31,10 @@ fn main() -> Result<()> {
         ui.on_recalculate_receive_address(move || {
             set_status(&weak, recalculate_receive_address_from_ui(&weak))
         });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_copy_receive_address(move || set_status(&weak, copy_receive_address_from_ui(&weak)));
     }
     {
         let weak = ui.as_weak();
@@ -276,6 +282,7 @@ fn load_recipients_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
         .join("\n");
     ui.set_recipient_table_rows(recipient_table_rows(&recipients));
     ui.set_recipient_rows(rows.into());
+    ui.set_total_payroll_sat(total_payroll_sat(&recipients).to_string().into());
     update_fee_suggestion(&ui, recipients.len());
     Ok("Loaded recipients".to_string())
 }
@@ -292,6 +299,7 @@ fn save_recipients_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_recipients_path(path.display().to_string().into());
     save_recipients(&path, &recipients)?;
     ui.set_recipient_table_rows(recipient_entry_table_rows(&recipients));
+    ui.set_total_payroll_sat(total_recipient_amount_sat(&recipients).to_string().into());
     update_fee_suggestion(&ui, recipients.len());
     save_app_config_from_ui(&ui)?;
     Ok("Saved recipients".to_string())
@@ -597,7 +605,8 @@ fn broadcast_final_tx_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> 
     Ok(format!("Broadcast transaction {txid}"))
 }
 
-const CONFIG_PATH: &str = "config.toml";
+const APP_CONFIG_DIR: &str = ".silent-pay";
+const CONFIG_FILE_NAME: &str = "config.toml";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct AppConfig {
@@ -640,19 +649,14 @@ fn default_rpc_url() -> String {
 }
 
 fn load_app_config() -> AppConfig {
-    fs::read_to_string(CONFIG_PATH)
-        .ok()
-        .and_then(|contents| toml::from_str(&contents).ok())
-        .unwrap_or_else(|| AppConfig {
-            network: default_config_network(),
-            data_dir: default_data_dir(),
-            fee_rate_sat_vb: default_fee_rate_sat_vb(),
-            dust_limit_sat: default_dust_limit_sat(),
-            rpc_url: default_rpc_url(),
-            rpc_cookie_file: String::new(),
-            rpc_user: String::new(),
-            rpc_password: String::new(),
+    config_paths()
+        .into_iter()
+        .find_map(|path| {
+            fs::read_to_string(path)
+                .ok()
+                .and_then(|contents| toml::from_str(&contents).ok())
         })
+        .unwrap_or_else(default_app_config)
 }
 
 fn save_app_config_from_ui(ui: &PayrollGui) -> Result<()> {
@@ -676,8 +680,13 @@ fn save_app_config_from_ui(ui: &PayrollGui) -> Result<()> {
         rpc_user: ui.get_rpc_user().to_string(),
         rpc_password: ui.get_rpc_password().to_string(),
     };
-    fs::write(CONFIG_PATH, toml::to_string_pretty(&config)?)
-        .with_context(|| format!("failed to write config {CONFIG_PATH}"))
+    let path = write_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+    }
+    fs::write(&path, toml::to_string_pretty(&config)?)
+        .with_context(|| format!("failed to write config {}", path.display()))
 }
 
 fn rpc_auth(cookie_file: &str, user: &str, password: &str) -> Auth {
@@ -691,6 +700,46 @@ fn rpc_auth(cookie_file: &str, user: &str, password: &str) -> Auth {
     } else {
         Auth::UserPass(user.to_string(), password.to_string())
     }
+}
+
+fn default_app_config() -> AppConfig {
+    AppConfig {
+        network: default_config_network(),
+        data_dir: default_data_dir(),
+        fee_rate_sat_vb: default_fee_rate_sat_vb(),
+        dust_limit_sat: default_dust_limit_sat(),
+        rpc_url: default_rpc_url(),
+        rpc_cookie_file: String::new(),
+        rpc_user: String::new(),
+        rpc_password: String::new(),
+    }
+}
+
+fn config_paths() -> Vec<PathBuf> {
+    config_paths_for_home(env::var_os("HOME"))
+}
+
+fn write_config_path() -> PathBuf {
+    home_config_path().unwrap_or_else(local_config_path)
+}
+
+fn home_config_path() -> Option<PathBuf> {
+    home_config_path_for_home(env::var_os("HOME"))
+}
+
+fn config_paths_for_home(home: Option<impl Into<PathBuf>>) -> Vec<PathBuf> {
+    match home_config_path_for_home(home) {
+        Some(path) => vec![path, local_config_path()],
+        None => vec![local_config_path()],
+    }
+}
+
+fn home_config_path_for_home(home: Option<impl Into<PathBuf>>) -> Option<PathBuf> {
+    home.map(|home| home.into().join(APP_CONFIG_DIR).join(CONFIG_FILE_NAME))
+}
+
+fn local_config_path() -> PathBuf {
+    PathBuf::from(CONFIG_FILE_NAME)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -741,6 +790,20 @@ fn recalculate_receive_address_from_ui(weak: &slint::Weak<PayrollGui>) -> Result
     let ui = weak.upgrade().context("GUI closed")?;
     update_receive_address(&ui)?;
     Ok("Updated receive address".to_string())
+}
+
+fn copy_receive_address_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
+    let ui = weak.upgrade().context("GUI closed")?;
+    let address = ui.get_receive_address();
+    let address = address.trim();
+    if address.is_empty() {
+        bail!("receive address is empty");
+    }
+    ClipboardContext::new()
+        .map_err(|err| anyhow!("failed to access system clipboard: {err}"))?
+        .set_contents(address.to_string())
+        .map_err(|err| anyhow!("failed to copy receive address: {err}"))?;
+    Ok("Copied receive address".to_string())
 }
 
 fn update_receive_address(ui: &PayrollGui) -> Result<()> {
@@ -824,7 +887,22 @@ fn set_recipient_entries(ui: &PayrollGui, recipients: &[RecipientEntry]) {
         .join("\n");
     ui.set_recipient_rows(rows.into());
     ui.set_recipient_table_rows(recipient_entry_table_rows(recipients));
+    ui.set_total_payroll_sat(total_recipient_amount_sat(recipients).to_string().into());
     update_fee_suggestion(ui, recipients.len());
+}
+
+fn total_payroll_sat(recipients: &[PayrollRecipient]) -> u64 {
+    recipients
+        .iter()
+        .map(|recipient| recipient.amount.to_sat())
+        .sum()
+}
+
+fn total_recipient_amount_sat(recipients: &[RecipientEntry]) -> u64 {
+    recipients
+        .iter()
+        .map(|recipient| recipient.amount_sat)
+        .sum()
 }
 
 fn selected_recipient_index(row_count: usize, row: i32) -> Option<usize> {
@@ -1421,6 +1499,25 @@ mod tests {
     }
 
     #[test]
+    fn config_paths_prefer_home_config_then_local_config() {
+        assert_eq!(
+            config_paths_for_home(Some(PathBuf::from("/home/macgyver"))),
+            vec![
+                PathBuf::from("/home/macgyver/.silent-pay/config.toml"),
+                PathBuf::from("config.toml")
+            ]
+        );
+    }
+
+    #[test]
+    fn config_paths_use_local_config_without_home() {
+        assert_eq!(
+            config_paths_for_home(None::<PathBuf>),
+            vec![PathBuf::from("config.toml")]
+        );
+    }
+
+    #[test]
     fn rpc_auth_uses_cookie_file_when_present() {
         match rpc_auth(" /tmp/bitcoin/.cookie ", "user", "password") {
             Auth::CookieFile(path) => assert_eq!(path, PathBuf::from("/tmp/bitcoin/.cookie")),
@@ -1445,6 +1542,26 @@ mod tests {
         assert_eq!(selected_recipient_index(2, 0), Some(0));
         assert_eq!(selected_recipient_index(2, 1), Some(1));
         assert_eq!(selected_recipient_index(2, 2), None);
+    }
+
+    #[test]
+    fn total_recipient_amount_sums_recipient_rows() {
+        let recipients = vec![
+            RecipientEntry {
+                label: None,
+                seed_hex: None,
+                address: Some("tb1recipient1".to_string()),
+                amount_sat: 1_000,
+            },
+            RecipientEntry {
+                label: Some("second".to_string()),
+                seed_hex: None,
+                address: Some("tb1recipient2".to_string()),
+                amount_sat: 2_500,
+            },
+        ];
+
+        assert_eq!(total_recipient_amount_sat(&recipients), 3_500);
     }
 
     #[test]

@@ -83,7 +83,7 @@ component SectionHeader inherits Rectangle {
         }
         Rectangle {}
         if root.show-toggle : ActionButton {
-            width: 88px;
+            width: 80px;
             text: root.shown ? "Hide" : "Show";
             clicked => {
                 root.toggle();
@@ -148,6 +148,7 @@ export component PayrollGui inherits Window {
     in-out property <string> pending_change_label: "payroll change";
     in-out property <string> recipients_path: "recipients.toml";
     in-out property <string> recipient_rows: "";
+    in-out property <string> total_payroll_sat: "0";
     in-out property <[[StandardListViewItem]]> recipient_table_rows;
     in-out property <int> selected_recipient_row: -1;
     in-out property <string> recipient_label: "";
@@ -170,11 +171,12 @@ export component PayrollGui inherits Window {
     in-out property <string> rpc_password: "";
     in-out property <string> status: "";
     property <length> scroll_content_height: active_tab == 1
-        ? (show_utxos && show_recipients ? 1160px : 870px)
-        : (active_tab == 0 ? 810px : 830px);
+        ? (show_utxos && show_recipients ? 1210px : 900px)
+        : (active_tab == 0 ? 920px : 830px);
 
     callback save_wallet();
     callback recalculate_receive_address();
+    callback copy_receive_address();
     callback browse_data_dir();
     callback save_utxos();
     callback select_utxo(int);
@@ -334,8 +336,14 @@ export component PayrollGui inherits Window {
                         HorizontalLayout {
                             spacing: 12px;
                             FieldLabel { label: "Receive"; }
-                            LineEdit { text: root.receive_address; height: 40px; }
-                            ActionButton { width: 96px; text: "Copy"; }
+                            Text {
+                                text: root.receive_address;
+                                height: 40px;
+                                color: #d5d5dc;
+                                font-size: 17px;
+                                vertical-alignment: center;
+                            }
+                            ActionButton { width: 96px; text: "Copy"; clicked => { root.copy_receive_address(); } }
                             FieldLabel { label: "Last Index"; width: 92px; }
                             LineEdit {
                                 text <=> root.last_derivation_index;
@@ -392,10 +400,11 @@ export component PayrollGui inherits Window {
                                 spacing: 14px;
                                 HorizontalLayout {
                                     Rectangle {}
-                                    ActionButton { width: 210px; text: "[+] Previous Output"; tone: "good"; clicked => { root.add_utxo(); } }
-                                    ActionButton { width: 230px; text: "[-] Previous Output"; tone: "danger"; clicked => { root.remove_utxo(); } }
-                                    Rectangle { width: 24px; }
-                                    ActionButton { width: 90px; text: "Save"; clicked => { root.save_utxos(); } }
+                                    ActionButton { width: 190px; text: "[+] Previous Output"; tone: "good"; clicked => { root.add_utxo(); } }
+                                    Rectangle { width: 20px; }
+                                    ActionButton { width: 190px; text: "[-] Previous Output"; tone: "danger"; clicked => { root.remove_utxo(); } }
+                                    Rectangle { width: 20px; }
+                                    ActionButton { width: 80px; text: "Save"; clicked => { root.save_utxos(); } }
                                 }
                                 StandardTableView {
                                     height: 136px;
@@ -471,6 +480,17 @@ export component PayrollGui inherits Window {
 
                         if root.show_recipients : VerticalLayout {
                             spacing: 14px;
+                            HorizontalLayout {
+                                spacing: 12px;
+                                FieldLabel { label: "Total"; }
+                                Text {
+                                    text: root.total_payroll_sat + " sat";
+                                    color: #d5d5dc;
+                                    font-size: 16px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                            }
                             StandardTableView {
                                 height: 170px;
                                 rows <=> root.recipient_table_rows;
@@ -495,10 +515,11 @@ export component PayrollGui inherits Window {
                             }
                             HorizontalLayout {
                                 Rectangle {}
-                                ActionButton { width: 170px; text: "[+] Recipient"; tone: "good"; clicked => { root.add_recipient(); } }
-                                ActionButton { width: 190px; text: "[-] Recipient"; tone: "danger"; clicked => { root.remove_recipient(); } }
-                                Rectangle { width: 24px; }
-                                ActionButton { width: 90px; text: "Save"; clicked => { root.save_recipients(); } }
+                                ActionButton { width: 150px; text: "[+] Recipient"; tone: "good"; clicked => { root.add_recipient(); } }
+                                Rectangle { width: 20px; }
+                                ActionButton { width: 150px; text: "[-] Recipient"; tone: "danger"; clicked => { root.remove_recipient(); } }
+                                Rectangle { width: 20px; }
+                                ActionButton { width: 80px; text: "Save"; clicked => { root.save_recipients(); } }
                             }
                         }
                     }

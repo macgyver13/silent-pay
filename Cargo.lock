@@ -4301,6 +4301,7 @@ dependencies = [
  "bip39",
  "bitcoin",
  "bitcoincore-rpc",
+ "copypasta",
  "hex",
  "hmac",
  "musig2",

@@ -10,6 +10,7 @@ bip375-helpers = { path = "/Users/ron/src/bip375-examples/rust/crates/bip375-hel
 bitcoincore-rpc = "0.19.0"
 bip39 = "2.0"
 bitcoin = "0.32.6"
+copypasta = "0.10.2"
 hex = "0.4"
 hmac = "0.12"
 musig2 = { version = "0.3.1", features = ["secp256k1"] }
