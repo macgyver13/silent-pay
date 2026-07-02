@@ -117,7 +117,7 @@ export component PayrollGui inherits Window {
     preferred-width: 1274px;
     preferred-height: 860px;
     min-width: 760px;
-    min-height: 640px;
+    min-height: 680px;
     max-width: 4096px;
     max-height: 4096px;
 
@@ -171,9 +171,6 @@ export component PayrollGui inherits Window {
     in-out property <string> rpc_user: "";
     in-out property <string> rpc_password: "";
     in-out property <string> status: "";
-    property <length> scroll_content_height: active_tab == 1
-        ? (show_utxos && show_recipients ? 1210px : 900px)
-        : (active_tab == 0 ? 920px : 830px);
 
     callback save_wallet();
     callback recalculate_receive_address();
@@ -244,11 +241,11 @@ export component PayrollGui inherits Window {
             main-scroll := ScrollView {
                 vertical-stretch: 1;
                 viewport-width: main-scroll.visible-width;
-                viewport-height: root.scroll_content_height;
+
+                VerticalLayout {
+                    width: main-scroll.visible-width;
 
                 if root.active_tab == 0 : VerticalLayout {
-                    width: main-scroll.visible-width;
-                    height: root.scroll_content_height;
                     padding: 32px;
                     spacing: 24px;
 
@@ -326,8 +323,6 @@ export component PayrollGui inherits Window {
                 }
 
                 if root.active_tab == 1 : VerticalLayout {
-                    width: main-scroll.visible-width;
-                    height: root.scroll_content_height;
                     padding: 32px;
                     spacing: 24px;
 
@@ -534,8 +529,6 @@ export component PayrollGui inherits Window {
                 }
 
                 if root.active_tab == 2 : VerticalLayout {
-                    width: main-scroll.visible-width;
-                    height: root.scroll_content_height;
                     padding: 32px;
                     spacing: 24px;
 
@@ -599,6 +592,7 @@ export component PayrollGui inherits Window {
                     }
 
                     ScrollBottomSpacer {}
+                }
                 }
             }
 
