@@ -817,15 +817,30 @@ fn copy_receive_address_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
 fn update_receive_address(ui: &PayrollGui) -> Result<()> {
     let wallet = wallet_from_ui(ui)?;
     let address = receive_address(&wallet)?;
+    let change_address = change_address(&wallet)?;
     ui.set_receive_address(address.into());
+    ui.set_change_address(change_address.into());
     Ok(())
 }
 
 fn receive_address(wallet: &TreasuryWalletConfig) -> Result<String> {
     let script =
         derive_treasury_script_pubkey(wallet, RECEIVE_CHAIN, wallet.last_derivation_index)?;
+    address_from_script(wallet, &script)
+}
+
+fn change_address(wallet: &TreasuryWalletConfig) -> Result<String> {
+    let script =
+        derive_treasury_script_pubkey(wallet, CHANGE_CHAIN, wallet.change_derivation_index)?;
+    address_from_script(wallet, &script)
+}
+
+fn address_from_script(
+    wallet: &TreasuryWalletConfig,
+    script: &bitcoin::ScriptBuf,
+) -> Result<String> {
     let network = bitcoin_network(wallet.network_value()?);
-    Ok(Address::from_script(&script, network)?.to_string())
+    Ok(Address::from_script(script, network)?.to_string())
 }
 
 fn bitcoin_network(network: SpNetwork) -> Network {
@@ -1436,6 +1451,19 @@ mod tests {
         let address_5 = receive_address(&wallet).unwrap();
         wallet.last_derivation_index = 6;
         let address_6 = receive_address(&wallet).unwrap();
+
+        assert!(address_5.starts_with("tb1p"));
+        assert!(address_6.starts_with("tb1p"));
+        assert_ne!(address_5, address_6);
+    }
+
+    #[test]
+    fn change_address_changes_with_change_derivation_index() {
+        let mut wallet = load_wallet("testnet/wallet.toml").unwrap();
+        wallet.change_derivation_index = 5;
+        let address_5 = change_address(&wallet).unwrap();
+        wallet.change_derivation_index = 6;
+        let address_6 = change_address(&wallet).unwrap();
 
         assert!(address_5.starts_with("tb1p"));
         assert!(address_6.starts_with("tb1p"));

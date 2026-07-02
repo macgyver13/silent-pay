@@ -129,6 +129,7 @@ export component PayrollGui inherits Window {
     in-out property <string> last_derivation_index: "0";
     in-out property <string> change_derivation_index: "0";
     in-out property <string> receive_address: "";
+    in-out property <string> change_address: "";
     in-out property <string> utxo_chain: "0";
     in-out property <string> utxo_derivation_index: "0";
     in-out property <string> descriptor: "";
@@ -351,7 +352,26 @@ export component PayrollGui inherits Window {
                                 }
                             }
                             FieldLabel { label: "Change Index"; width: 112px; }
-                            LineEdit { text <=> root.change_derivation_index; height: 40px; width: 96px; }
+                            LineEdit {
+                                text <=> root.change_derivation_index;
+                                height: 40px;
+                                width: 96px;
+                                edited(text) => {
+                                    root.change_derivation_index = text;
+                                    root.recalculate_receive_address();
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "Change"; }
+                            Text {
+                                text: root.change_address;
+                                height: 40px;
+                                color: #d5d5dc;
+                                font-size: 17px;
+                                vertical-alignment: center;
+                            }
                         }
                     }
 
