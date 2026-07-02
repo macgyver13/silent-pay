@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use bitcoin::{Amount, Transaction, Txid};
+use bitcoin::{Address, Amount, Network, Transaction, Txid};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use psbt::Psbt as SilentPaymentPsbt;
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use silent_pay::{
     load_wallet, save_recipients, save_wallet, BuildInitialPayrollConfig, PayrollRecipient,
     RecipientEntry, TreasuryPrevout, TreasurySigner, TreasuryWalletConfig,
 };
+use silentpayments::Network as SpNetwork;
 use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,15 +22,13 @@ fn main() -> Result<()> {
     let ui = PayrollGui::new()?;
     {
         let weak = ui.as_weak();
-        ui.on_load_wallet(move || set_status(&weak, load_wallet_into_ui(&weak)));
-    }
-    {
-        let weak = ui.as_weak();
         ui.on_save_wallet(move || set_status(&weak, save_wallet_from_ui(&weak)));
     }
     {
         let weak = ui.as_weak();
-        ui.on_load_utxos(move || set_status(&weak, load_utxos_into_ui(&weak)));
+        ui.on_recalculate_receive_address(move || {
+            set_status(&weak, recalculate_receive_address_from_ui(&weak))
+        });
     }
     {
         let weak = ui.as_weak();
@@ -49,15 +48,27 @@ fn main() -> Result<()> {
     }
     {
         let weak = ui.as_weak();
+        ui.on_browse_data_dir(move || set_status(&weak, browse_data_dir_into_ui(&weak)));
+    }
+    {
+        let weak = ui.as_weak();
         ui.on_save_utxo_state(move || set_status(&weak, save_utxo_state_from_ui(&weak)));
     }
     {
         let weak = ui.as_weak();
-        ui.on_load_recipients(move || set_status(&weak, load_recipients_into_ui(&weak)));
+        ui.on_save_recipients(move || set_status(&weak, save_recipients_from_ui(&weak)));
     }
     {
         let weak = ui.as_weak();
-        ui.on_save_recipients(move || set_status(&weak, save_recipients_from_ui(&weak)));
+        ui.on_select_recipient(move |row| set_status(&weak, select_recipient_from_ui(&weak, row)));
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_add_recipient(move || set_status(&weak, add_recipient_from_ui(&weak)));
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_remove_recipient(move || set_status(&weak, remove_recipient_from_ui(&weak)));
     }
     {
         let weak = ui.as_weak();
@@ -82,6 +93,13 @@ fn main() -> Result<()> {
 
     let config = load_app_config();
     ui.set_wallet_network(config.network.clone().into());
+    ui.set_data_dir(config.data_dir.clone().into());
+    ui.set_fee_rate_sat_vb(config.fee_rate_sat_vb.to_string().into());
+    ui.set_dust_limit_sat(config.dust_limit_sat.to_string().into());
+    ui.set_rpc_url(config.rpc_url.clone().into());
+    ui.set_rpc_user(config.rpc_user.clone().into());
+    ui.set_rpc_password(config.rpc_password.clone().into());
+    update_fee_suggestion(&ui, 0);
     if default_network_directory(&config.network).is_some() {
         let weak = ui.as_weak();
         set_status(&weak, load_configured_network(&weak));
@@ -102,6 +120,7 @@ fn load_wallet_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
     let path = default_path_for_network(
         ui.get_wallet_network().as_str(),
+        ui.get_data_dir().as_str(),
         ui.get_wallet_path().as_str(),
         "wallet.toml",
     );
@@ -112,6 +131,7 @@ fn load_wallet_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_change_derivation_index(wallet.change_derivation_index.to_string().into());
     ui.set_descriptor(wallet.descriptor.unwrap_or_default().into());
     ui.set_signer_rows(signer_rows(&wallet.signers));
+    update_receive_address(&ui)?;
     Ok("Loaded wallet".to_string())
 }
 
@@ -120,15 +140,17 @@ fn save_wallet_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let wallet = wallet_from_ui(&ui)?;
     let path = default_path_for_network(
         wallet.network.as_str(),
+        ui.get_data_dir().as_str(),
         ui.get_wallet_path().as_str(),
         "wallet.toml",
     );
     ui.set_wallet_path(path.display().to_string().into());
     save_wallet(&path, &wallet)?;
-    save_app_config(&wallet.network)?;
+    save_app_config_from_ui(&ui)?;
     let wallet = load_wallet(&path)?;
     ui.set_descriptor(wallet.descriptor.unwrap_or_default().into());
     ui.set_signer_rows(signer_rows(&wallet.signers));
+    update_receive_address(&ui)?;
     Ok("Saved wallet".to_string())
 }
 
@@ -136,6 +158,7 @@ fn load_utxos_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
     let path = default_path_for_network(
         ui.get_wallet_network().as_str(),
+        ui.get_data_dir().as_str(),
         ui.get_utxos_path().as_str(),
         "utxos.toml",
     );
@@ -149,6 +172,7 @@ fn save_utxos_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
     let path = default_path_for_network(
         ui.get_wallet_network().as_str(),
+        ui.get_data_dir().as_str(),
         ui.get_utxos_path().as_str(),
         "utxos.toml",
     );
@@ -168,6 +192,7 @@ fn select_utxo_from_ui(weak: &slint::Weak<PayrollGui>, row: i32) -> Result<Strin
     ui.set_utxo_derivation_index(utxo.derivation_index.to_string().into());
     ui.set_last_derivation_index(utxo.derivation_index.to_string().into());
     ui.set_change_derivation_index(utxo.derivation_index.saturating_add(1).to_string().into());
+    update_receive_address(&ui)?;
     Ok(format!("Selected UTXO row {}", row + 1))
 }
 
@@ -175,6 +200,7 @@ fn add_utxo_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
     let path = default_path_for_network(
         ui.get_wallet_network().as_str(),
+        ui.get_data_dir().as_str(),
         ui.get_utxos_path().as_str(),
         "utxos.toml",
     );
@@ -191,6 +217,7 @@ fn remove_utxo_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
     let path = default_path_for_network(
         ui.get_wallet_network().as_str(),
+        ui.get_data_dir().as_str(),
         ui.get_utxos_path().as_str(),
         "utxos.toml",
     );
@@ -211,10 +238,24 @@ fn remove_utxo_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     Ok(format!("Removed UTXO {}:{}", removed.txid, removed.vout))
 }
 
+fn browse_data_dir_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
+    let ui = weak.upgrade().context("GUI closed")?;
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Select data directory")
+        .pick_folder()
+    else {
+        return Ok("Data directory selection canceled".to_string());
+    };
+    ui.set_data_dir(path.display().to_string().into());
+    save_app_config_from_ui(&ui)?;
+    Ok("Selected data directory".to_string())
+}
+
 fn load_recipients_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
     let path = default_path_for_network(
         ui.get_wallet_network().as_str(),
+        ui.get_data_dir().as_str(),
         ui.get_recipients_path().as_str(),
         "recipients.toml",
     );
@@ -234,6 +275,7 @@ fn load_recipients_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
         .join("\n");
     ui.set_recipient_table_rows(recipient_table_rows(&recipients));
     ui.set_recipient_rows(rows.into());
+    update_fee_suggestion(&ui, recipients.len());
     Ok("Loaded recipients".to_string())
 }
 
@@ -242,36 +284,91 @@ fn save_recipients_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let recipients = recipient_rows(ui.get_recipient_rows().as_str())?;
     let path = default_path_for_network(
         ui.get_wallet_network().as_str(),
+        ui.get_data_dir().as_str(),
         ui.get_recipients_path().as_str(),
         "recipients.toml",
     );
     ui.set_recipients_path(path.display().to_string().into());
     save_recipients(&path, &recipients)?;
     ui.set_recipient_table_rows(recipient_entry_table_rows(&recipients));
+    update_fee_suggestion(&ui, recipients.len());
+    save_app_config_from_ui(&ui)?;
     Ok("Saved recipients".to_string())
+}
+
+fn select_recipient_from_ui(weak: &slint::Weak<PayrollGui>, row: i32) -> Result<String> {
+    let ui = weak.upgrade().context("GUI closed")?;
+    if row < 0 {
+        return Ok("No recipient selected".to_string());
+    }
+    let recipients = recipient_rows(ui.get_recipient_rows().as_str())?;
+    let Some(index) = selected_recipient_index(recipients.len(), row) else {
+        bail!("selected recipient row is out of range");
+    };
+    let recipient = &recipients[index];
+    ui.set_recipient_label(recipient.label.clone().unwrap_or_default().into());
+    ui.set_recipient_address(recipient.address.clone().unwrap_or_default().into());
+    ui.set_recipient_amount_sat(recipient.amount_sat.to_string().into());
+    Ok(format!("Selected recipient row {}", row + 1))
+}
+
+fn add_recipient_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
+    let ui = weak.upgrade().context("GUI closed")?;
+    let mut rows = recipient_rows(ui.get_recipient_rows().as_str())?;
+    let address = ui.get_recipient_address().trim().to_string();
+    if address.is_empty() {
+        bail!("recipient address is required");
+    }
+    rows.push(RecipientEntry {
+        label: blank_to_none(ui.get_recipient_label().as_str()),
+        amount_sat: ui
+            .get_recipient_amount_sat()
+            .as_str()
+            .parse()
+            .context("invalid recipient amount_sat")?,
+        seed_hex: None,
+        address: Some(address),
+    });
+    set_recipient_entries(&ui, &rows);
+    Ok("Added recipient row".to_string())
+}
+
+fn remove_recipient_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
+    let ui = weak.upgrade().context("GUI closed")?;
+    let row = ui.get_selected_recipient_row();
+    let mut rows = recipient_rows(ui.get_recipient_rows().as_str())?;
+    let Some(index) = selected_recipient_index(rows.len(), row) else {
+        bail!("select a recipient row to remove");
+    };
+    rows.remove(index);
+    ui.set_selected_recipient_row(-1);
+    set_recipient_entries(&ui, &rows);
+    Ok(format!("Removed recipient row {}", row + 1))
 }
 
 fn save_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
-    let psbt_path = match classify_psbt_save_path(ui.get_psbt_path().as_str()) {
-        PsbtSavePath::Direct(path) => path,
-        PsbtSavePath::NeedsDialog { directory } => {
-            let picked = rfd::FileDialog::new()
-                .set_directory(directory)
-                .set_file_name("payroll.psbt")
-                .save_file();
-            let Some(path) = picked else {
-                return Ok("PSBT save canceled".to_string());
-            };
-            path
-        }
-    };
+    let psbt_path =
+        match classify_psbt_save_path(ui.get_data_dir().as_str(), ui.get_psbt_path().as_str()) {
+            PsbtSavePath::Direct(path) => path,
+            PsbtSavePath::NeedsDialog { directory } => {
+                let picked = rfd::FileDialog::new()
+                    .set_directory(directory)
+                    .set_file_name("payroll.psbt")
+                    .save_file();
+                let Some(path) = picked else {
+                    return Ok("PSBT save canceled".to_string());
+                };
+                path
+            }
+        };
     ui.set_psbt_path(psbt_path.display().to_string().into());
 
     let wallet = wallet_from_ui(&ui)?;
     let recipients = recipient_rows(ui.get_recipient_rows().as_str())?;
     let recipients_path = default_path_for_network(
         wallet.network.as_str(),
+        ui.get_data_dir().as_str(),
         ui.get_recipients_path().as_str(),
         "recipients.toml",
     );
@@ -325,7 +422,12 @@ fn pick_finalize_psbt_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> 
 
 fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
-    let result = finalize_payroll(ui.get_finalize_psbt_path().as_str())
+    let finalize_psbt_path = data_dir_path(
+        ui.get_data_dir().as_str(),
+        ui.get_finalize_psbt_path().as_str(),
+    );
+    ui.set_finalize_psbt_path(finalize_psbt_path.display().to_string().into());
+    let result = finalize_payroll(&finalize_psbt_path)
         .context("failed to finalize PSBT; make sure it contains all required contributions")?;
     let change_derivation_index = parse_u32(
         ui.get_change_derivation_index().as_str(),
@@ -349,6 +451,7 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
     ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
     ui.set_last_derivation_index(change.derivation_index.to_string().into());
     ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
+    update_receive_address(&ui)?;
     ui.set_final_tx_hex_path(result.final_tx_hex_path.display().to_string().into());
     ui.set_finalize_summary(
         format!(
@@ -377,6 +480,7 @@ fn save_utxo_state_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
     let path = default_path_for_network(
         ui.get_wallet_network().as_str(),
+        ui.get_data_dir().as_str(),
         ui.get_utxos_path().as_str(),
         "utxos.toml",
     );
@@ -451,6 +555,7 @@ fn load_final_tx_hex_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
     ui.set_last_derivation_index(change.derivation_index.to_string().into());
     ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
+    update_receive_address(&ui)?;
     ui.set_finalize_summary(
         format!(
             "loaded final tx hex: {}\ntxid: {txid}\nspent input: {}:{}\nnew change: {}:{}\nchange amount: {}\nchange derivation index: {}\nnext change derivation index: {}",
@@ -500,10 +605,38 @@ const CONFIG_PATH: &str = "config.toml";
 struct AppConfig {
     #[serde(default = "default_config_network")]
     network: String,
+    #[serde(default = "default_data_dir")]
+    data_dir: String,
+    #[serde(default = "default_fee_rate_sat_vb")]
+    fee_rate_sat_vb: u64,
+    #[serde(default = "default_dust_limit_sat")]
+    dust_limit_sat: u64,
+    #[serde(default = "default_rpc_url")]
+    rpc_url: String,
+    #[serde(default)]
+    rpc_user: String,
+    #[serde(default)]
+    rpc_password: String,
 }
 
 fn default_config_network() -> String {
     "testnet".to_string()
+}
+
+fn default_data_dir() -> String {
+    ".".to_string()
+}
+
+fn default_fee_rate_sat_vb() -> u64 {
+    4
+}
+
+fn default_dust_limit_sat() -> u64 {
+    546
+}
+
+fn default_rpc_url() -> String {
+    "http://127.0.0.1:18332".to_string()
 }
 
 fn load_app_config() -> AppConfig {
@@ -512,12 +645,34 @@ fn load_app_config() -> AppConfig {
         .and_then(|contents| toml::from_str(&contents).ok())
         .unwrap_or_else(|| AppConfig {
             network: default_config_network(),
+            data_dir: default_data_dir(),
+            fee_rate_sat_vb: default_fee_rate_sat_vb(),
+            dust_limit_sat: default_dust_limit_sat(),
+            rpc_url: default_rpc_url(),
+            rpc_user: String::new(),
+            rpc_password: String::new(),
         })
 }
 
-fn save_app_config(network: &str) -> Result<()> {
+fn save_app_config_from_ui(ui: &PayrollGui) -> Result<()> {
+    let fee_rate_sat_vb = ui
+        .get_fee_rate_sat_vb()
+        .as_str()
+        .parse()
+        .context("invalid fee rate sat/vB")?;
+    let dust_limit_sat = ui
+        .get_dust_limit_sat()
+        .as_str()
+        .parse()
+        .context("invalid dust limit sat")?;
     let config = AppConfig {
-        network: network.to_string(),
+        network: ui.get_wallet_network().to_string(),
+        data_dir: ui.get_data_dir().to_string(),
+        fee_rate_sat_vb,
+        dust_limit_sat,
+        rpc_url: ui.get_rpc_url().to_string(),
+        rpc_user: ui.get_rpc_user().to_string(),
+        rpc_password: ui.get_rpc_password().to_string(),
     };
     fs::write(CONFIG_PATH, toml::to_string_pretty(&config)?)
         .with_context(|| format!("failed to write config {CONFIG_PATH}"))
@@ -567,6 +722,33 @@ fn wallet_from_ui(ui: &PayrollGui) -> Result<TreasuryWalletConfig> {
     })
 }
 
+fn recalculate_receive_address_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
+    let ui = weak.upgrade().context("GUI closed")?;
+    update_receive_address(&ui)?;
+    Ok("Updated receive address".to_string())
+}
+
+fn update_receive_address(ui: &PayrollGui) -> Result<()> {
+    let wallet = wallet_from_ui(ui)?;
+    let address = receive_address(&wallet)?;
+    ui.set_receive_address(address.into());
+    Ok(())
+}
+
+fn receive_address(wallet: &TreasuryWalletConfig) -> Result<String> {
+    let script = derive_treasury_script_pubkey(wallet, wallet.last_derivation_index)?;
+    let network = bitcoin_network(wallet.network_value()?);
+    Ok(Address::from_script(&script, network)?.to_string())
+}
+
+fn bitcoin_network(network: SpNetwork) -> Network {
+    match network {
+        SpNetwork::Mainnet => Network::Bitcoin,
+        SpNetwork::Testnet => Network::Testnet,
+        SpNetwork::Regtest => Network::Regtest,
+    }
+}
+
 fn recipient_rows(rows: &str) -> Result<Vec<RecipientEntry>> {
     let mut recipients = Vec::new();
     for (idx, line) in rows.lines().enumerate() {
@@ -610,6 +792,32 @@ fn recipient_entry_table_rows(
             recipient.amount_sat.to_string(),
         ]
     }))
+}
+
+fn set_recipient_entries(ui: &PayrollGui, recipients: &[RecipientEntry]) {
+    let rows = recipients
+        .iter()
+        .map(|recipient| {
+            format!(
+                "{},{},{}",
+                recipient.label.clone().unwrap_or_default(),
+                recipient.address.clone().unwrap_or_default(),
+                recipient.amount_sat
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    ui.set_recipient_rows(rows.into());
+    ui.set_recipient_table_rows(recipient_entry_table_rows(recipients));
+    update_fee_suggestion(ui, recipients.len());
+}
+
+fn selected_recipient_index(row_count: usize, row: i32) -> Option<usize> {
+    if row < 0 {
+        return None;
+    }
+    let index = row as usize;
+    (index < row_count).then_some(index)
 }
 
 fn utxo_from_ui(ui: &PayrollGui, status: UtxoStatus) -> Result<TreasuryUtxo> {
@@ -691,6 +899,7 @@ fn utxo_table_row(utxo: &TreasuryUtxo) -> Vec<String> {
 fn selected_utxo(ui: &PayrollGui, row: i32) -> Result<TreasuryUtxo> {
     let path = default_path_for_network(
         ui.get_wallet_network().as_str(),
+        ui.get_data_dir().as_str(),
         ui.get_utxos_path().as_str(),
         "utxos.toml",
     );
@@ -845,15 +1054,16 @@ enum PsbtSavePath {
     NeedsDialog { directory: PathBuf },
 }
 
-fn classify_psbt_save_path(value: &str) -> PsbtSavePath {
-    let path = PathBuf::from(value.trim());
+fn classify_psbt_save_path(data_dir: &str, value: &str) -> PsbtSavePath {
+    let value = value.trim();
+    let path = data_dir_path(data_dir, value);
     if path.file_name().is_some() && path.extension().is_some() {
         return PsbtSavePath::Direct(path);
     }
 
     let directory = if path.as_os_str().is_empty() {
         PathBuf::from(".")
-    } else if path.is_dir() {
+    } else if value.ends_with('/') || value.ends_with('\\') || path.is_dir() {
         path
     } else {
         path.parent()
@@ -864,13 +1074,28 @@ fn classify_psbt_save_path(value: &str) -> PsbtSavePath {
     PsbtSavePath::NeedsDialog { directory }
 }
 
-fn default_path_for_network(network: &str, current_path: &str, file_name: &str) -> PathBuf {
+fn data_dir_path(data_dir: &str, value: &str) -> PathBuf {
+    let path = PathBuf::from(value.trim());
+    if path.is_absolute() {
+        return path;
+    }
+    PathBuf::from(data_dir.trim()).join(path)
+}
+
+fn default_path_for_network(
+    network: &str,
+    data_dir: &str,
+    current_path: &str,
+    file_name: &str,
+) -> PathBuf {
     let current = PathBuf::from(current_path.trim());
     let Some(directory) = default_network_directory(network) else {
         return current;
     };
     if is_default_file_path(&current, file_name) {
-        return PathBuf::from(directory).join(file_name);
+        return PathBuf::from(data_dir.trim())
+            .join(directory)
+            .join(file_name);
     }
     current
 }
@@ -898,6 +1123,28 @@ fn is_default_file_path(path: &Path, file_name: &str) -> bool {
         .and_then(|parent| parent.to_str())
         .is_some_and(|parent| parent == "testnet" || parent == "mainnet")
         && path.file_name().and_then(|name| name.to_str()) == Some(file_name)
+}
+
+fn estimated_payroll_vbytes(recipient_count: usize) -> u64 {
+    180 + 43 * recipient_count as u64
+}
+
+fn suggested_fee_sat(fee_rate_sat_vb: u64, recipient_count: usize) -> u64 {
+    fee_rate_sat_vb.saturating_mul(estimated_payroll_vbytes(recipient_count))
+}
+
+fn update_fee_suggestion(ui: &PayrollGui, recipient_count: usize) {
+    let fee_rate = ui
+        .get_fee_rate_sat_vb()
+        .as_str()
+        .parse()
+        .unwrap_or_else(|_| default_fee_rate_sat_vb());
+    let suggested = suggested_fee_sat(fee_rate, recipient_count);
+    ui.set_suggested_fee_sat(suggested.to_string().into());
+    let current_fee = ui.get_miner_fee_sat();
+    if current_fee.trim().is_empty() || current_fee.as_str() == "1000" {
+        ui.set_miner_fee_sat(suggested.to_string().into());
+    }
 }
 
 fn final_tx_from_hex_file(path: impl AsRef<Path>) -> Result<Transaction> {
@@ -973,17 +1220,17 @@ mod tests {
     #[test]
     fn full_psbt_path_saves_directly() {
         assert_eq!(
-            classify_psbt_save_path("output/payroll.psbt"),
-            PsbtSavePath::Direct(PathBuf::from("output/payroll.psbt"))
+            classify_psbt_save_path("/tmp/silent-pay", "output/payroll.psbt"),
+            PsbtSavePath::Direct(PathBuf::from("/tmp/silent-pay/output/payroll.psbt"))
         );
     }
 
     #[test]
     fn directory_path_needs_dialog_in_that_directory() {
         assert_eq!(
-            classify_psbt_save_path("output/"),
+            classify_psbt_save_path("/tmp/silent-pay", "output/"),
             PsbtSavePath::NeedsDialog {
-                directory: PathBuf::from("output/")
+                directory: PathBuf::from("/tmp/silent-pay/output/")
             }
         );
     }
@@ -991,45 +1238,75 @@ mod tests {
     #[test]
     fn extensionless_path_needs_dialog_in_parent_directory() {
         assert_eq!(
-            classify_psbt_save_path("output/payroll"),
+            classify_psbt_save_path("/tmp/silent-pay", "output/payroll"),
             PsbtSavePath::NeedsDialog {
-                directory: PathBuf::from("output")
+                directory: PathBuf::from("/tmp/silent-pay/output")
             }
+        );
+    }
+
+    #[test]
+    fn absolute_psbt_path_is_preserved() {
+        assert_eq!(
+            classify_psbt_save_path("/tmp/silent-pay", "/var/tmp/payroll.psbt"),
+            PsbtSavePath::Direct(PathBuf::from("/var/tmp/payroll.psbt"))
         );
     }
 
     #[test]
     fn testnet_network_uses_testnet_default_paths() {
         assert_eq!(
-            default_path_for_network("bitcoin-testnet4", "wallet.toml", "wallet.toml"),
-            PathBuf::from("testnet/wallet.toml")
+            default_path_for_network("bitcoin-testnet4", ".", "wallet.toml", "wallet.toml"),
+            PathBuf::from("./testnet/wallet.toml")
         );
         assert_eq!(
-            default_path_for_network("testnet", "recipients.toml", "recipients.toml"),
-            PathBuf::from("testnet/recipients.toml")
+            default_path_for_network("testnet", ".", "recipients.toml", "recipients.toml"),
+            PathBuf::from("./testnet/recipients.toml")
         );
         assert_eq!(
-            default_path_for_network("testnet", "output/utxos.toml", "utxos.toml"),
-            PathBuf::from("testnet/utxos.toml")
+            default_path_for_network("testnet", ".", "output/utxos.toml", "utxos.toml"),
+            PathBuf::from("./testnet/utxos.toml")
         );
     }
 
     #[test]
     fn mainnet_network_uses_mainnet_default_paths() {
         assert_eq!(
-            default_path_for_network("mainnet", "wallet.toml", "wallet.toml"),
-            PathBuf::from("mainnet/wallet.toml")
+            default_path_for_network("mainnet", ".", "wallet.toml", "wallet.toml"),
+            PathBuf::from("./mainnet/wallet.toml")
         );
         assert_eq!(
-            default_path_for_network("bitcoin", "recipients.toml", "recipients.toml"),
-            PathBuf::from("mainnet/recipients.toml")
+            default_path_for_network("bitcoin", ".", "recipients.toml", "recipients.toml"),
+            PathBuf::from("./mainnet/recipients.toml")
+        );
+    }
+
+    #[test]
+    fn data_dir_roots_network_default_paths() {
+        assert_eq!(
+            default_path_for_network(
+                "/bitcoin-testnet4",
+                "/tmp/silent-pay",
+                "wallet.toml",
+                "wallet.toml"
+            ),
+            PathBuf::from("/tmp/silent-pay/testnet/wallet.toml")
+        );
+        assert_eq!(
+            default_path_for_network(
+                "mainnet",
+                "/tmp/silent-pay",
+                "testnet/utxos.toml",
+                "utxos.toml"
+            ),
+            PathBuf::from("/tmp/silent-pay/mainnet/utxos.toml")
         );
     }
 
     #[test]
     fn explicit_custom_paths_are_preserved() {
         assert_eq!(
-            default_path_for_network("testnet", "archive/wallet.toml", "wallet.toml"),
+            default_path_for_network("testnet", ".", "archive/wallet.toml", "wallet.toml"),
             PathBuf::from("archive/wallet.toml")
         );
     }
@@ -1037,14 +1314,27 @@ mod tests {
     #[test]
     fn existing_network_default_paths_can_switch_networks() {
         assert_eq!(
-            default_path_for_network("mainnet", "testnet/wallet.toml", "wallet.toml"),
-            PathBuf::from("mainnet/wallet.toml")
+            default_path_for_network("mainnet", ".", "testnet/wallet.toml", "wallet.toml"),
+            PathBuf::from("./mainnet/wallet.toml")
         );
     }
 
     #[test]
     fn selected_utxo_advances_change_derivation_index() {
         assert_eq!(next_change_derivation_index(7), 8);
+    }
+
+    #[test]
+    fn receive_address_changes_with_last_derivation_index() {
+        let mut wallet = load_wallet("testnet/wallet.toml").unwrap();
+        wallet.last_derivation_index = 5;
+        let address_5 = receive_address(&wallet).unwrap();
+        wallet.last_derivation_index = 6;
+        let address_6 = receive_address(&wallet).unwrap();
+
+        assert!(address_5.starts_with("tb1p"));
+        assert!(address_6.starts_with("tb1p"));
+        assert_ne!(address_5, address_6);
     }
 
     #[test]
@@ -1079,14 +1369,52 @@ mod tests {
 
     #[test]
     fn app_config_parses_network() {
-        let config: AppConfig = toml::from_str("network = \"mainnet\"").unwrap();
+        let config: AppConfig = toml::from_str(
+            r#"
+            network = "mainnet"
+            data_dir = "/tmp/silent-pay"
+            fee_rate_sat_vb = 7
+            dust_limit_sat = 600
+            rpc_url = "http://127.0.0.1:8332"
+            rpc_user = "user"
+            rpc_password = "password"
+            "#,
+        )
+        .unwrap();
         assert_eq!(config.network, "mainnet");
+        assert_eq!(config.data_dir, "/tmp/silent-pay");
+        assert_eq!(config.fee_rate_sat_vb, 7);
+        assert_eq!(config.dust_limit_sat, 600);
+        assert_eq!(config.rpc_url, "http://127.0.0.1:8332");
+        assert_eq!(config.rpc_user, "user");
+        assert_eq!(config.rpc_password, "password");
     }
 
     #[test]
-    fn app_config_defaults_to_testnet_when_empty() {
+    fn app_config_defaults_when_empty() {
         let config: AppConfig = toml::from_str("").unwrap();
         assert_eq!(config.network, "testnet");
+        assert_eq!(config.data_dir, ".");
+        assert_eq!(config.fee_rate_sat_vb, 4);
+        assert_eq!(config.dust_limit_sat, 546);
+        assert_eq!(config.rpc_url, "http://127.0.0.1:18332");
+        assert_eq!(config.rpc_user, "");
+        assert_eq!(config.rpc_password, "");
+    }
+
+    #[test]
+    fn selected_recipient_index_rejects_out_of_range_rows() {
+        assert_eq!(selected_recipient_index(2, -1), None);
+        assert_eq!(selected_recipient_index(2, 0), Some(0));
+        assert_eq!(selected_recipient_index(2, 1), Some(1));
+        assert_eq!(selected_recipient_index(2, 2), None);
+    }
+
+    #[test]
+    fn fee_suggestion_scales_by_recipient_count() {
+        assert_eq!(suggested_fee_sat(4, 0), 720);
+        assert_eq!(suggested_fee_sat(4, 1), 892);
+        assert_eq!(suggested_fee_sat(4, 3), 1236);
     }
 
     fn test_utxo(txid: &str, status: UtxoStatus) -> TreasuryUtxo {
