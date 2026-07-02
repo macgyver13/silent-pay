@@ -17,11 +17,18 @@ use crate::musig2_spdk::keyagg;
 use crate::recipients::{address_amounts, load_recipients, PayrollRecipient};
 use crate::wallet::{TreasuryWalletConfig, TreasuryWalletConfig as WalletConfig};
 
+/// BIP-32 external (receive) chain: synthetic `/0/*` leaf on the aggregate key.
+pub const RECEIVE_CHAIN: u32 = 0;
+/// BIP-32 internal (change) chain: synthetic `/1/*` leaf on the aggregate key.
+pub const CHANGE_CHAIN: u32 = 1;
+
 #[derive(Debug, Clone)]
 pub struct TreasuryPrevout {
     pub txid: Txid,
     pub vout: u32,
     pub amount: Amount,
+    /// BIP-32 chain of the prevout being spent: [`RECEIVE_CHAIN`] or [`CHANGE_CHAIN`].
+    pub chain: u32,
     pub derivation_index: u32,
 }
 
@@ -87,8 +94,14 @@ pub fn build_initial_payroll_psbt(
         .ok_or_else(|| anyhow::anyhow!("change amount underflow"))?;
 
     let secp = Secp256k1::new();
-    let input_keys = derive_wallet_public_keys(&secp, &wallet, config.prevout.derivation_index)?;
-    let change_keys = derive_wallet_public_keys(&secp, &wallet, wallet.change_derivation_index)?;
+    let input_keys = derive_wallet_public_keys(
+        &secp,
+        &wallet,
+        config.prevout.chain,
+        config.prevout.derivation_index,
+    )?;
+    let change_keys =
+        derive_wallet_public_keys(&secp, &wallet, CHANGE_CHAIN, wallet.change_derivation_index)?;
     let recipient_pairs = address_amounts(&recipients);
     let psbt = construct_initial_psbt(
         &input_keys,
@@ -118,11 +131,12 @@ pub fn build_initial_payroll_psbt(
 
 pub fn derive_treasury_script_pubkey(
     wallet: &TreasuryWalletConfig,
+    chain: u32,
     derivation_index: u32,
 ) -> Result<ScriptBuf> {
     let wallet = wallet.normalized()?;
     let secp = Secp256k1::new();
-    Ok(derive_wallet_public_keys(&secp, &wallet, derivation_index)?.p2tr_script)
+    Ok(derive_wallet_public_keys(&secp, &wallet, chain, derivation_index)?.p2tr_script)
 }
 
 struct WalletPublicKeys {
@@ -130,6 +144,7 @@ struct WalletPublicKeys {
     untweaked_agg_pk: PublicKey,
     plain_child_xonly: bitcoin::key::XOnlyPublicKey,
     p2tr_script: ScriptBuf,
+    chain: u32,
     derivation_index: u32,
     /// Per-participant TAP_BIP32_DERIVATION key origins: the cosigner's derived
     /// x-only key with its master fingerprint and full path from that master.
@@ -139,6 +154,7 @@ struct WalletPublicKeys {
 fn derive_wallet_public_keys(
     secp: &Secp256k1<secp256k1::All>,
     wallet: &WalletConfig,
+    chain: u32,
     derivation_index: u32,
 ) -> Result<WalletPublicKeys> {
     let mut participant_pks = Vec::with_capacity(wallet.signers.len());
@@ -158,7 +174,7 @@ fn derive_wallet_public_keys(
 
     let base_ctx = keyagg::build_key_agg_ctx(&participant_pks)?;
     let untweaked_agg_pk = keyagg::from_musig2_pubkey(&base_ctx.aggregated_pubkey())?;
-    let path_indices = vec![0, derivation_index];
+    let path_indices = vec![chain, derivation_index];
     let plain_child_pk = apply_bip328_plain_tweaks(secp, untweaked_agg_pk, &path_indices)?;
     let (plain_child_xonly, _) = plain_child_pk.x_only_public_key();
     let (tweaked_ctx, _) =
@@ -173,6 +189,7 @@ fn derive_wallet_public_keys(
         untweaked_agg_pk,
         plain_child_xonly,
         p2tr_script,
+        chain,
         derivation_index,
         participant_origins,
     })
@@ -215,7 +232,7 @@ fn construct_initial_psbt(
         &input_keys.untweaked_agg_pk,
         &input_keys.participant_pks,
     );
-    // The aggregate MuSig2 key's [0, index] child-derivation path lives in a
+    // The aggregate MuSig2 key's [chain, index] child-derivation path lives in a
     // TAP_BIP32_DERIVATION entry (BIP-373), not in the BIP-376 SP-spend field
     // (which is only for spending inputs that are themselves silent-payment
     // outputs). The finalizer reads it back to re-derive the aggregate for ECDH.
@@ -223,6 +240,7 @@ fn construct_initial_psbt(
         &mut psbt.inputs[0],
         &input_keys.untweaked_agg_pk,
         input_keys.plain_child_xonly,
+        input_keys.chain,
         input_keys.derivation_index,
     );
     // BIP-373: per-participant TAP_BIP32_DERIVATION so each cosigner's signing
@@ -373,6 +391,7 @@ mod tests {
             .expect("txid"),
             vout: 7,
             amount: Amount::from_sat(10_000),
+            chain: RECEIVE_CHAIN,
             derivation_index: 0,
         };
 
@@ -442,8 +461,13 @@ mod tests {
         // and is keyed by the taproot internal key (the derived aggregate), with
         // the synthetic root fingerprint hash160(untweaked_agg_pk)[..4].
         let secp = Secp256k1::new();
-        let input_keys = derive_wallet_public_keys(&secp, &wallet.normalized().expect("wallet"), 0)
-            .expect("keys");
+        let input_keys = derive_wallet_public_keys(
+            &secp,
+            &wallet.normalized().expect("wallet"),
+            RECEIVE_CHAIN,
+            0,
+        )
+        .expect("keys");
         let internal_key = psbt.inputs[0].tap_internal_key.expect("internal key");
         assert_eq!(internal_key, input_keys.plain_child_xonly);
         let (_, (agg_fp, agg_path)) = input_origins.get(&internal_key).expect("aggregate origin");

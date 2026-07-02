@@ -55,9 +55,9 @@ pub fn parse_wallet(contents: &str) -> Result<TreasuryWalletConfig> {
         network: raw.network,
         descriptor: raw.descriptor,
         last_derivation_index: raw.last_derivation_index,
-        change_derivation_index: raw
-            .change_derivation_index
-            .unwrap_or_else(|| raw.last_derivation_index.saturating_add(1)),
+        // Change lives on its own BIP-32 internal chain (/1/*), so its index is
+        // independent of the receive (/0/*) index and starts at 0.
+        change_derivation_index: raw.change_derivation_index.unwrap_or(0),
         signers: raw.signers,
     };
     wallet.normalized()
@@ -211,7 +211,7 @@ fn default_network() -> String {
 }
 
 fn default_change_derivation_index() -> u32 {
-    1
+    0
 }
 
 fn network_name(network: SpNetwork) -> &'static str {
@@ -250,7 +250,7 @@ mod tests {
 
         assert_eq!(wallet.signers.len(), 2);
         assert_eq!(wallet.last_derivation_index, 0);
-        assert_eq!(wallet.change_derivation_index, 1);
+        assert_eq!(wallet.change_derivation_index, 0);
         assert!(wallet.descriptor.unwrap().starts_with("tr(musig("));
     }
 

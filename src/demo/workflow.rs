@@ -268,6 +268,7 @@ pub fn construct_psbt(
         &mut psbt.inputs[0],
         &keys.untweaked_agg_pk,
         keys.untweaked_agg_xonly,
+        0,
         DEMO_SP_INDEX,
     );
 

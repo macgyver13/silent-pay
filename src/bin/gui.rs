@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use silent_pay::{
     build_initial_payroll_psbt, derive_treasury_script_pubkey, finalize_payroll, load_recipients,
     load_wallet, save_recipients, save_wallet, BuildInitialPayrollConfig, PayrollRecipient,
-    RecipientEntry, TreasuryPrevout, TreasurySigner, TreasuryWalletConfig,
+    RecipientEntry, TreasuryPrevout, TreasurySigner, TreasuryWalletConfig, CHANGE_CHAIN,
+    RECEIVE_CHAIN,
 };
 use silentpayments::Network as SpNetwork;
 use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
@@ -196,9 +197,10 @@ fn select_utxo_from_ui(weak: &slint::Weak<PayrollGui>, row: i32) -> Result<Strin
     ui.set_txid(utxo.txid.clone().into());
     ui.set_vout(utxo.vout.to_string().into());
     ui.set_prevout_amount_sat(utxo.amount_sat.to_string().into());
+    ui.set_utxo_chain(utxo.chain.to_string().into());
     ui.set_utxo_derivation_index(utxo.derivation_index.to_string().into());
-    ui.set_last_derivation_index(utxo.derivation_index.to_string().into());
-    ui.set_change_derivation_index(utxo.derivation_index.saturating_add(1).to_string().into());
+    // The receive (/0/*) and change (/1/*) counters are wallet-level and loaded
+    // from the wallet; they are independent of the selected input's own index.
     update_receive_address(&ui)?;
     Ok(format!("Selected UTXO row {}", row + 1))
 }
@@ -393,6 +395,7 @@ fn save_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
                 .parse()
                 .context("invalid prevout amount_sat")?,
         ),
+        chain: parse_u32(ui.get_utxo_chain().as_str(), "UTXO chain")?,
         derivation_index: parse_u32(
             ui.get_utxo_derivation_index().as_str(),
             "UTXO derivation index",
@@ -458,7 +461,7 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
     ui.set_pending_change_amount_sat(change.amount_sat.to_string().into());
     ui.set_pending_change_derivation_index(change.derivation_index.to_string().into());
     ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
-    ui.set_last_derivation_index(change.derivation_index.to_string().into());
+    // Change advances its own /1/* counter; the receive (/0/*) index is untouched.
     ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
     update_receive_address(&ui)?;
     ui.set_final_tx_hex_path(result.final_tx_hex_path.display().to_string().into());
@@ -519,6 +522,7 @@ fn save_utxo_state_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
             .as_str()
             .parse()
             .context("invalid pending change amount_sat")?,
+        chain: CHANGE_CHAIN,
         derivation_index: parse_u32(
             ui.get_pending_change_derivation_index().as_str(),
             "pending change derivation index",
@@ -562,7 +566,7 @@ fn load_final_tx_hex_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_pending_change_amount_sat(change.amount_sat.to_string().into());
     ui.set_pending_change_derivation_index(change.derivation_index.to_string().into());
     ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
-    ui.set_last_derivation_index(change.derivation_index.to_string().into());
+    // Change advances its own /1/* counter; the receive (/0/*) index is untouched.
     ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
     update_receive_address(&ui)?;
     ui.set_finalize_summary(
@@ -753,6 +757,10 @@ struct TreasuryUtxo {
     txid: String,
     vout: u32,
     amount_sat: u64,
+    /// BIP-32 chain: RECEIVE_CHAIN (/0/*) or CHANGE_CHAIN (/1/*). Defaults to
+    /// receive for records written before change moved to its own chain.
+    #[serde(default)]
+    chain: u32,
     derivation_index: u32,
     status: UtxoStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -814,7 +822,8 @@ fn update_receive_address(ui: &PayrollGui) -> Result<()> {
 }
 
 fn receive_address(wallet: &TreasuryWalletConfig) -> Result<String> {
-    let script = derive_treasury_script_pubkey(wallet, wallet.last_derivation_index)?;
+    let script =
+        derive_treasury_script_pubkey(wallet, RECEIVE_CHAIN, wallet.last_derivation_index)?;
     let network = bitcoin_network(wallet.network_value()?);
     Ok(Address::from_script(&script, network)?.to_string())
 }
@@ -924,6 +933,7 @@ fn utxo_from_ui(ui: &PayrollGui, status: UtxoStatus) -> Result<TreasuryUtxo> {
             .as_str()
             .parse()
             .context("invalid prevout amount_sat")?,
+        chain: parse_u32(ui.get_utxo_chain().as_str(), "UTXO chain")?,
         derivation_index: parse_u32(
             ui.get_utxo_derivation_index().as_str(),
             "UTXO derivation index",
@@ -984,6 +994,7 @@ fn utxo_table_row(utxo: &TreasuryUtxo) -> Vec<String> {
         utxo.txid.clone(),
         utxo.vout.to_string(),
         utxo.amount_sat.to_string(),
+        utxo.chain.to_string(),
         utxo.derivation_index.to_string(),
         utxo.label.clone().unwrap_or_default(),
     ]
@@ -1063,7 +1074,7 @@ fn change_prevout_from_psbt(
     let bytes =
         fs::read(path).with_context(|| format!("failed to read PSBT {}", path.display()))?;
     let psbt = SilentPaymentPsbt::deserialize(&bytes).context("failed to parse final PSBT")?;
-    let change_script = derive_treasury_script_pubkey(wallet, derivation_index)?;
+    let change_script = derive_treasury_script_pubkey(wallet, CHANGE_CHAIN, derivation_index)?;
     let change = psbt
         .outputs
         .iter()
@@ -1084,6 +1095,7 @@ fn change_prevout_from_psbt(
             .try_into()
             .map_err(|_| anyhow::anyhow!("change vout does not fit u32"))?,
         amount_sat,
+        chain: CHANGE_CHAIN,
         derivation_index,
         status: UtxoStatus::Available,
         label: Some("payroll change".to_string()),
@@ -1096,7 +1108,7 @@ fn change_prevout_from_tx(
     wallet: &TreasuryWalletConfig,
     derivation_index: u32,
 ) -> Result<TreasuryUtxo> {
-    let change_script = derive_treasury_script_pubkey(wallet, derivation_index)?;
+    let change_script = derive_treasury_script_pubkey(wallet, CHANGE_CHAIN, derivation_index)?;
     let change = tx
         .output
         .iter()
@@ -1117,6 +1129,7 @@ fn change_prevout_from_tx(
             .try_into()
             .map_err(|_| anyhow::anyhow!("change vout does not fit u32"))?,
         amount_sat,
+        chain: CHANGE_CHAIN,
         derivation_index,
         status: UtxoStatus::Available,
         label: Some("payroll change".to_string()),
@@ -1452,12 +1465,13 @@ mod tests {
             txid: "txid".to_string(),
             vout: 1,
             amount_sat: 2,
+            chain: RECEIVE_CHAIN,
             derivation_index: 3,
             status: UtxoStatus::Spent,
             label: Some("label".to_string()),
         });
 
-        assert_eq!(row, vec!["txid", "1", "2", "3", "label"]);
+        assert_eq!(row, vec!["txid", "1", "2", "0", "3", "label"]);
     }
 
     #[test]
@@ -1576,6 +1590,7 @@ mod tests {
             txid: txid.to_string(),
             vout: 0,
             amount_sat: 1_000,
+            chain: RECEIVE_CHAIN,
             derivation_index: 0,
             status,
             label: None,

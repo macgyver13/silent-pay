@@ -286,8 +286,9 @@ pub fn musig2_agg_fingerprint(agg_pk: &PublicKey) -> Fingerprint {
     Fingerprint::from(fp)
 }
 
-/// Record the aggregate MuSig2 key's `[0, index]` synthetic child-derivation path
-/// on an input as a TAP_BIP32_DERIVATION entry (BIP-373).
+/// Record the aggregate MuSig2 key's `[chain, index]` synthetic child-derivation
+/// path on an input as a TAP_BIP32_DERIVATION entry (BIP-373). `chain` is the
+/// BIP-32 external (`0`) or internal/change (`1`) branch.
 ///
 /// The entry is keyed by `derived_xonly` — the synthetically-derived aggregate
 /// child (the taproot internal key `der_agg_k`) — because that is where a signer
@@ -299,9 +300,13 @@ pub fn set_input_musig2_agg_derivation(
     input: &mut Input,
     agg_pk: &PublicKey,
     derived_xonly: XOnlyPublicKey,
+    chain: u32,
     index: u32,
 ) {
-    let path: DerivationPath = [0, index].iter().map(|&n| ChildNumber::from(n)).collect();
+    let path: DerivationPath = [chain, index]
+        .iter()
+        .map(|&n| ChildNumber::from(n))
+        .collect();
     input.tap_key_origins.insert(
         derived_xonly,
         (Vec::new(), (musig2_agg_fingerprint(agg_pk), path)),
