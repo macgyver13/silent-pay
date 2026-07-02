@@ -97,6 +97,7 @@ fn main() -> Result<()> {
     ui.set_fee_rate_sat_vb(config.fee_rate_sat_vb.to_string().into());
     ui.set_dust_limit_sat(config.dust_limit_sat.to_string().into());
     ui.set_rpc_url(config.rpc_url.clone().into());
+    ui.set_rpc_cookie_file(config.rpc_cookie_file.clone().into());
     ui.set_rpc_user(config.rpc_user.clone().into());
     ui.set_rpc_password(config.rpc_password.clone().into());
     update_fee_suggestion(&ui, 0);
@@ -583,14 +584,11 @@ fn broadcast_final_tx_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> 
         bail!("final tx hex path is empty or contains no transaction hex");
     }
 
-    let auth = if ui.get_rpc_user().is_empty() && ui.get_rpc_password().is_empty() {
-        Auth::None
-    } else {
-        Auth::UserPass(
-            ui.get_rpc_user().to_string(),
-            ui.get_rpc_password().to_string(),
-        )
-    };
+    let auth = rpc_auth(
+        ui.get_rpc_cookie_file().as_str(),
+        ui.get_rpc_user().as_str(),
+        ui.get_rpc_password().as_str(),
+    );
     let client =
         Client::new(ui.get_rpc_url().as_str(), auth).context("failed to create RPC client")?;
     let txid = client
@@ -613,6 +611,8 @@ struct AppConfig {
     dust_limit_sat: u64,
     #[serde(default = "default_rpc_url")]
     rpc_url: String,
+    #[serde(default)]
+    rpc_cookie_file: String,
     #[serde(default)]
     rpc_user: String,
     #[serde(default)]
@@ -649,6 +649,7 @@ fn load_app_config() -> AppConfig {
             fee_rate_sat_vb: default_fee_rate_sat_vb(),
             dust_limit_sat: default_dust_limit_sat(),
             rpc_url: default_rpc_url(),
+            rpc_cookie_file: String::new(),
             rpc_user: String::new(),
             rpc_password: String::new(),
         })
@@ -671,11 +672,25 @@ fn save_app_config_from_ui(ui: &PayrollGui) -> Result<()> {
         fee_rate_sat_vb,
         dust_limit_sat,
         rpc_url: ui.get_rpc_url().to_string(),
+        rpc_cookie_file: ui.get_rpc_cookie_file().to_string(),
         rpc_user: ui.get_rpc_user().to_string(),
         rpc_password: ui.get_rpc_password().to_string(),
     };
     fs::write(CONFIG_PATH, toml::to_string_pretty(&config)?)
         .with_context(|| format!("failed to write config {CONFIG_PATH}"))
+}
+
+fn rpc_auth(cookie_file: &str, user: &str, password: &str) -> Auth {
+    let cookie_file = cookie_file.trim();
+    if !cookie_file.is_empty() {
+        return Auth::CookieFile(PathBuf::from(cookie_file));
+    }
+
+    if user.is_empty() && password.is_empty() {
+        Auth::None
+    } else {
+        Auth::UserPass(user.to_string(), password.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1376,6 +1391,7 @@ mod tests {
             fee_rate_sat_vb = 7
             dust_limit_sat = 600
             rpc_url = "http://127.0.0.1:8332"
+            rpc_cookie_file = "/tmp/bitcoin/.cookie"
             rpc_user = "user"
             rpc_password = "password"
             "#,
@@ -1386,6 +1402,7 @@ mod tests {
         assert_eq!(config.fee_rate_sat_vb, 7);
         assert_eq!(config.dust_limit_sat, 600);
         assert_eq!(config.rpc_url, "http://127.0.0.1:8332");
+        assert_eq!(config.rpc_cookie_file, "/tmp/bitcoin/.cookie");
         assert_eq!(config.rpc_user, "user");
         assert_eq!(config.rpc_password, "password");
     }
@@ -1398,8 +1415,28 @@ mod tests {
         assert_eq!(config.fee_rate_sat_vb, 4);
         assert_eq!(config.dust_limit_sat, 546);
         assert_eq!(config.rpc_url, "http://127.0.0.1:18332");
+        assert_eq!(config.rpc_cookie_file, "");
         assert_eq!(config.rpc_user, "");
         assert_eq!(config.rpc_password, "");
+    }
+
+    #[test]
+    fn rpc_auth_uses_cookie_file_when_present() {
+        match rpc_auth(" /tmp/bitcoin/.cookie ", "user", "password") {
+            Auth::CookieFile(path) => assert_eq!(path, PathBuf::from("/tmp/bitcoin/.cookie")),
+            auth => panic!("expected cookie auth, got {auth:?}"),
+        }
+    }
+
+    #[test]
+    fn rpc_auth_uses_user_pass_without_cookie_file() {
+        match rpc_auth("", "user", "password") {
+            Auth::UserPass(user, password) => {
+                assert_eq!(user, "user");
+                assert_eq!(password, "password");
+            }
+            auth => panic!("expected user/password auth, got {auth:?}"),
+        }
     }
 
     #[test]

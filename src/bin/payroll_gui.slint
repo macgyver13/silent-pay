@@ -165,6 +165,7 @@ export component PayrollGui inherits Window {
     in-out property <string> final_txid: "";
     in-out property <string> finalize_summary: "";
     in-out property <string> rpc_url: "http://127.0.0.1:18332";
+    in-out property <string> rpc_cookie_file: "";
     in-out property <string> rpc_user: "";
     in-out property <string> rpc_password: "";
     in-out property <string> status: "";
@@ -306,10 +307,15 @@ export component PayrollGui inherits Window {
                             spacing: 12px;
                             FieldLabel { label: "RPC URL"; }
                             LineEdit { text <=> root.rpc_url; height: 40px; }
-                            FieldLabel { label: "RPC User"; width: 76px; }
-                            LineEdit { text <=> root.rpc_user; height: 40px; width: 150px; }
+                            FieldLabel { label: "Cookie"; width: 76px; }
+                            LineEdit { text <=> root.rpc_cookie_file; height: 40px; }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "RPC User"; }
+                            LineEdit { text <=> root.rpc_user; height: 40px; }
                             FieldLabel { label: "Password"; width: 76px; }
-                            LineEdit { text <=> root.rpc_password; height: 40px; width: 150px; }
+                            LineEdit { text <=> root.rpc_password; height: 40px; }
                         }
                     }
 
