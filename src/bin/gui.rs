@@ -1035,13 +1035,12 @@ fn append_fresh_utxo(utxos: &mut UtxoFile, utxo: TreasuryUtxo) -> Result<()> {
     {
         bail!("UTXO {}:{} is already recorded", utxo.txid, utxo.vout);
     }
-    if utxos
-        .utxos
-        .iter()
-        .any(|existing| existing.derivation_index == utxo.derivation_index)
-    {
+    if utxos.utxos.iter().any(|existing| {
+        existing.chain == utxo.chain && existing.derivation_index == utxo.derivation_index
+    }) {
         bail!(
-            "derivation index {} is already recorded",
+            "chain {} derivation index {} is already recorded",
+            utxo.chain,
             utxo.derivation_index
         );
     }
@@ -1460,6 +1459,49 @@ mod tests {
     }
 
     #[test]
+    fn append_fresh_utxo_allows_same_derivation_index_on_different_chains() {
+        let mut utxos = UtxoFile {
+            utxos: vec![test_utxo_on_chain(
+                "receive-txid",
+                RECEIVE_CHAIN,
+                1,
+                UtxoStatus::Available,
+            )],
+        };
+
+        append_fresh_utxo(
+            &mut utxos,
+            test_utxo_on_chain("change-txid", CHANGE_CHAIN, 1, UtxoStatus::Available),
+        )
+        .unwrap();
+
+        assert_eq!(utxos.utxos.len(), 2);
+    }
+
+    #[test]
+    fn append_fresh_utxo_rejects_same_derivation_index_on_same_chain() {
+        let mut utxos = UtxoFile {
+            utxos: vec![test_utxo_on_chain(
+                "first-txid",
+                CHANGE_CHAIN,
+                1,
+                UtxoStatus::Available,
+            )],
+        };
+
+        let err = append_fresh_utxo(
+            &mut utxos,
+            test_utxo_on_chain("second-txid", CHANGE_CHAIN, 1, UtxoStatus::Available),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "chain 1 derivation index 1 is already recorded"
+        );
+    }
+
+    #[test]
     fn utxo_table_row_does_not_include_status() {
         let row = utxo_table_row(&TreasuryUtxo {
             txid: "txid".to_string(),
@@ -1586,12 +1628,21 @@ mod tests {
     }
 
     fn test_utxo(txid: &str, status: UtxoStatus) -> TreasuryUtxo {
+        test_utxo_on_chain(txid, RECEIVE_CHAIN, 0, status)
+    }
+
+    fn test_utxo_on_chain(
+        txid: &str,
+        chain: u32,
+        derivation_index: u32,
+        status: UtxoStatus,
+    ) -> TreasuryUtxo {
         TreasuryUtxo {
             txid: txid.to_string(),
             vout: 0,
             amount_sat: 1_000,
-            chain: RECEIVE_CHAIN,
-            derivation_index: 0,
+            chain,
+            derivation_index,
             status,
             label: None,
         }
