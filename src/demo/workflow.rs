@@ -14,14 +14,13 @@ use musig2::SecNonce;
 use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 
-use bip375_helpers::transaction::build_psbt;
 use psbt::core::utils::to_psbt_dleq;
 use psbt::roles::{ExtractorPsbtExt, InputWitnessFinalizerPsbtExt};
 use psbt::{generate_dleq_proof, verify_dleq_proof, Psbt};
 use psbt_v2::v2::{Input, Output};
 
 use crate::musig2_psbt::{self as psbt_fields, PartialEcdhShareData};
-use crate::musig2_spdk::{finalize_sp_outputs, signing};
+use crate::musig2_spdk::{build_psbt, finalize_sp_outputs, signing};
 
 /// Build the 66-byte PSBT_OUT_SP_V0_INFO payload (scan_key || spend_key).
 fn sp_v0_info_bytes(address: &SilentPaymentAddress) -> [u8; 66] {
@@ -251,7 +250,7 @@ pub fn construct_psbt(
         script_pubkey: keys.p2tr_script.clone(),
     }));
 
-    let mut psbt = build_psbt(vec![input], outputs).map_err(|e| anyhow::anyhow!(e))?;
+    let mut psbt = build_psbt(vec![input], outputs)?;
 
     // PSBT_IN_TAP_INTERNAL_KEY holds the untweaked aggregate P (BIP-341/BIP-371);
     // the taproot tweak is applied when verifying the output key.

@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use bip375_helpers::transaction::build_psbt;
 use bitcoin::bip32::{DerivationPath, Fingerprint};
 use bitcoin::key::{TweakedPublicKey, XOnlyPublicKey};
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxOut, Txid};
@@ -13,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::musig2_psbt;
-use crate::musig2_spdk::keyagg;
+use crate::musig2_spdk::{build_psbt, keyagg};
 use crate::recipients::{address_amounts, load_recipients, PayrollRecipient};
 use crate::wallet::TreasuryWalletConfig;
 
@@ -225,7 +224,7 @@ fn construct_initial_psbt(
         script_pubkey: change_keys.p2tr_script.clone(),
     }));
 
-    let mut psbt = build_psbt(vec![input], outputs).map_err(|e| anyhow::anyhow!(e))?;
+    let mut psbt = build_psbt(vec![input], outputs)?;
     psbt.inputs[0].tap_internal_key = Some(input_keys.plain_child_xonly);
     musig2_psbt::set_input_musig2_participant_pubkeys(
         &mut psbt.inputs[0],
