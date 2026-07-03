@@ -1,10 +1,10 @@
 use anyhow::{bail, Context, Result};
 use bitcoin::bip32::{DerivationPath, Fingerprint};
 use bitcoin::key::{TweakedPublicKey, XOnlyPublicKey};
-use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxOut, Txid};
+use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, Txid};
 use hmac::{Hmac, Mac};
 use psbt::Psbt;
-use psbt_v2::v2::{Input, Output};
+use psbt_v2::v2::Output;
 use secp256k1::{PublicKey, Secp256k1};
 use sha2::Sha512;
 use silentpayments::Network as SpNetwork;
@@ -201,13 +201,6 @@ fn construct_initial_psbt(
     recipients: &[(silentpayments::SilentPaymentAddress, Amount)],
     change: Amount,
 ) -> Result<Psbt> {
-    let mut input = Input::new(&OutPoint::new(prevout.txid, prevout.vout));
-    input.sequence = Some(Sequence::MAX);
-    input.witness_utxo = Some(TxOut {
-        value: prevout.amount,
-        script_pubkey: input_keys.p2tr_script.clone(),
-    });
-
     let mut outputs: Vec<Output> = recipients
         .iter()
         .map(|(address, amount)| {
@@ -224,7 +217,11 @@ fn construct_initial_psbt(
         script_pubkey: change_keys.p2tr_script.clone(),
     }));
 
-    let mut psbt = build_psbt(vec![input], outputs)?;
+    let mut psbt = build_psbt(vec![OutPoint::new(prevout.txid, prevout.vout)], outputs)?;
+    psbt.inputs[0].witness_utxo = Some(TxOut {
+        value: prevout.amount,
+        script_pubkey: input_keys.p2tr_script.clone(),
+    });
     psbt.inputs[0].tap_internal_key = Some(input_keys.plain_child_xonly);
     musig2_psbt::set_input_musig2_participant_pubkeys(
         &mut psbt.inputs[0],

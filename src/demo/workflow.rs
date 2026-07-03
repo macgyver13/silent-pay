@@ -17,7 +17,7 @@ use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 use psbt::core::utils::to_psbt_dleq;
 use psbt::roles::{ExtractorPsbtExt, InputWitnessFinalizerPsbtExt};
 use psbt::{generate_dleq_proof, verify_dleq_proof, Psbt};
-use psbt_v2::v2::{Input, Output};
+use psbt_v2::v2::Output;
 
 use crate::musig2_psbt::{self as psbt_fields, PartialEcdhShareData};
 use crate::musig2_spdk::{build_psbt, finalize_sp_outputs, signing};
@@ -223,14 +223,6 @@ pub fn construct_psbt(
     let fee = Amount::from_sat(1_000);
     let input_amount = Amount::from_sat(total_payment) + change_amount + fee;
 
-    // One MuSig2 P2TR input spending the treasury UTXO.
-    let mut input = Input::new(&OutPoint::new(Txid::all_zeros(), 0));
-    input.sequence = Some(Sequence::MAX);
-    input.witness_utxo = Some(TxOut {
-        value: input_amount,
-        script_pubkey: keys.p2tr_script.clone(),
-    });
-
     // N silent-payment outputs (script computed later) + 1 change output to the
     // same MuSig2 script. `build_psbt` shuffles outputs (BIP-375), so SP vs change
     // is distinguished by `sp_v0_info`, not position.
@@ -250,7 +242,12 @@ pub fn construct_psbt(
         script_pubkey: keys.p2tr_script.clone(),
     }));
 
-    let mut psbt = build_psbt(vec![input], outputs)?;
+    let mut psbt = build_psbt(vec![OutPoint::new(Txid::all_zeros(), 0)], outputs)?;
+    // Updater role: attach the funding UTXO the signers and finalizers spend.
+    psbt.inputs[0].witness_utxo = Some(TxOut {
+        value: input_amount,
+        script_pubkey: keys.p2tr_script.clone(),
+    });
 
     // PSBT_IN_TAP_INTERNAL_KEY holds the untweaked aggregate P (BIP-341/BIP-371);
     // the taproot tweak is applied when verifying the output key.
