@@ -6,8 +6,9 @@
 //! that constructor is available upstream.
 
 use anyhow::{anyhow, Result};
-use bip375_helpers::crypto::tweaked_key_to_p2tr_script;
 use bitcoin::hashes::{sha256, Hash, HashEngine};
+use bitcoin::key::TweakedPublicKey;
+use bitcoin::ScriptBuf;
 use psbt::Psbt;
 use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 use std::collections::HashMap;
@@ -36,6 +37,11 @@ fn shared_secret_tweak(ecdh_shared_secret: &PublicKey, k: u32) -> [u8; 32] {
         b"BIP0352/SharedSecret",
         &[&ecdh_shared_secret.serialize(), &k.to_be_bytes()],
     )
+}
+
+fn tweaked_output_key_to_p2tr_script(tweaked_output_key: &PublicKey) -> ScriptBuf {
+    let (xonly, _) = tweaked_output_key.x_only_public_key();
+    ScriptBuf::new_p2tr_tweaked(TweakedPublicKey::dangerous_assume_tweaked(xonly))
 }
 
 /// Temporary bridge for deriving a BIP-352 output from a weighted MuSig2 share.
@@ -72,7 +78,8 @@ pub fn finalize_sp_outputs(secp: &Secp256k1<secp256k1::All>, psbt: &mut Psbt) ->
         let output_pubkey =
             derive_silent_payment_output_pubkey(secp, &spend_key, &shared_secret.serialize(), k)?;
 
-        psbt.outputs[output_idx].script_pubkey = tweaked_key_to_p2tr_script(&output_pubkey);
+        psbt.outputs[output_idx].script_pubkey =
+            tweaked_output_key_to_p2tr_script(&output_pubkey);
         scan_key_output_indices.insert(scan_key, k + 1);
     }
 

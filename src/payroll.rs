@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::musig2_psbt;
 use crate::musig2_spdk::keyagg;
 use crate::recipients::{address_amounts, load_recipients, PayrollRecipient};
-use crate::wallet::{TreasuryWalletConfig, TreasuryWalletConfig as WalletConfig};
+use crate::wallet::TreasuryWalletConfig;
 
 /// BIP-32 external (receive) chain: synthetic `/0/*` leaf on the aggregate key.
 pub const RECEIVE_CHAIN: u32 = 0;
@@ -153,7 +153,7 @@ struct WalletPublicKeys {
 
 fn derive_wallet_public_keys(
     secp: &Secp256k1<secp256k1::All>,
-    wallet: &WalletConfig,
+    wallet: &TreasuryWalletConfig,
     chain: u32,
     derivation_index: u32,
 ) -> Result<WalletPublicKeys> {
