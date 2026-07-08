@@ -15,8 +15,8 @@ payroll:
 
 [group('demo')]
 finalize:
-  cargo r --bin finalize -- {{coldcard_path}}/r2-charlie.psbt
+  cargo r --bin finalize -- {{cc_sp_out}}/musig2-sp-final.psbt
 
 [group('demo')]
 scan:
-  cargo r --bin scan_recipients -- "{{coldcard_path}}/r2-charlie.psbt"
+  cargo r --bin scan_recipients -- "{{cc_sp_out}}/musig2-sp-final.psbt" --recipients {{recipient_path}}/testnet/recipients.toml

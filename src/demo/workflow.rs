@@ -15,7 +15,6 @@ use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 
 use psbt::core::utils::to_psbt_dleq;
-use psbt::roles::{ExtractorPsbtExt, InputWitnessFinalizerPsbtExt};
 use psbt::{generate_dleq_proof, verify_dleq_proof, Psbt};
 use psbt_v2::v2::Output;
 
@@ -415,29 +414,6 @@ pub fn partial_sign(
     )
     .map_err(|e| anyhow::anyhow!("{party_name} partial sig: {e}"))?;
     Ok(())
-}
-
-/// Aggregate partial signatures into a Schnorr signature and extract the transaction.
-pub fn aggregate_and_extract(
-    secp: &Secp256k1<secp256k1::All>,
-    psbt: &mut Psbt,
-    key_agg_ctx: &musig2::KeyAggContext,
-    message: &[u8; 32],
-) -> Result<Transaction> {
-    signing::aggregate_musig2_sigs(&mut psbt.inputs[0], key_agg_ctx, message, secp)
-        .map_err(|e| anyhow::anyhow!("aggregate sigs: {e}"))?;
-
-    // Re-construct psbt to make sure callers references to psbt see a finalized version.
-    *psbt = psbt
-        .clone()
-        .finalize()
-        .map_err(|e| anyhow::anyhow!("finalize witnesses: {e:?}"))?;
-
-    let tx = psbt
-        .clone()
-        .extract_tx()
-        .map_err(|e| anyhow::anyhow!("extract: {e:?}"))?;
-    Ok(tx)
 }
 
 /// Derive the SP output script from the aggregated ECDH shares.

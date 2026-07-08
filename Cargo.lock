@@ -3675,6 +3675,7 @@ dependencies = [
 [[package]]
 name = "psbt"
 version = "0.1.0"
+source = "git+https://github.com/macgyver13/spdk.git?branch=musig2-working#e19bac9b7a40acd3eefa6dbd2b6733ca607049c1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3694,6 +3695,7 @@ dependencies = [
 [[package]]
 name = "psbt-v2"
 version = "0.3.0"
+source = "git+https://gitea.bitcoin.ninja/macgyver/rust-psbt.git?branch=musig2-working#15bdbd4a420a07f80a84415dfd2e453a8f12b486"
 dependencies = [
  "bitcoin",
  "miniscript",
@@ -4277,6 +4279,7 @@ dependencies = [
 [[package]]
 name = "silentpayments"
 version = "0.6.0"
+source = "git+https://github.com/macgyver13/spdk.git?branch=musig2-working#e19bac9b7a40acd3eefa6dbd2b6733ca607049c1"
 dependencies = [
  "bech32 0.9.1",
  "bitcoin_hashes 0.13.1",

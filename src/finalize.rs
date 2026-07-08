@@ -63,7 +63,7 @@ pub fn finalize_payroll(psbt_path: impl AsRef<Path>) -> Result<FinalizePayrollRe
 
     // Aggregate the partial signatures already present in the PSBT and extract the tx.
     let message = compute_sighash(&psbt)?;
-    aggregate_musig2_sigs(&mut psbt.inputs[0], &key_agg_ctx, &message, &secp)?;
+    aggregate_musig2_sigs(&mut psbt.inputs[0], &key_agg_ctx, &message)?;
     let psbt = psbt
         .clone()
         .finalize()

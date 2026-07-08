@@ -13,7 +13,7 @@ use musig2::{
     KeyAggContext, PartialSignature, PubNonce, SecNonce,
 };
 use psbt_v2::v2::Input;
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use secp256k1::{PublicKey, SecretKey};
 
 use crate::musig2_psbt::{
     add_input_musig2_partial_sig, add_input_musig2_pub_nonce, get_input_musig2_partial_sigs,
@@ -79,7 +79,6 @@ pub fn aggregate_musig2_sigs(
     input: &mut Input,
     key_agg_ctx: &KeyAggContext,
     message: &[u8; 32],
-    _secp: &Secp256k1<secp256k1::All>,
 ) -> Result<()> {
     let agg_nonce = collect_agg_nonce(input)?;
 

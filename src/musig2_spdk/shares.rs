@@ -18,21 +18,17 @@ use psbt::Psbt;
 /// Aggregated ECDH share and input pubkey sum for a single scan key.
 #[derive(Debug, Clone)]
 pub struct AggregatedShare {
-    pub scan_key: PublicKey,
     pub aggregated_share: PublicKey,
     pub input_sum: PublicKey,
 }
 
 /// Collection of aggregated shares keyed by scan key.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AggregatedShares {
     shares: HashMap<PublicKey, AggregatedShare>,
 }
 
 impl AggregatedShares {
-    pub fn get(&self, scan_key: &PublicKey) -> Option<&AggregatedShare> {
-        self.shares.get(scan_key)
-    }
     pub fn iter(&self) -> impl Iterator<Item = (&PublicKey, &AggregatedShare)> {
         self.shares.iter()
     }
@@ -106,7 +102,6 @@ pub fn aggregate_ecdh_shares(
         result.insert(
             scan_key,
             AggregatedShare {
-                scan_key,
                 aggregated_share,
                 input_sum,
             },
