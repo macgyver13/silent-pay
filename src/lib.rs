@@ -1,6 +1,5 @@
 pub mod demo;
 pub mod finalize;
-pub mod musig2_psbt;
 pub mod musig2_spdk;
 pub mod payroll;
 pub mod recipients;

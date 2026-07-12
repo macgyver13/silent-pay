@@ -9,10 +9,6 @@ use std::collections::{HashMap, HashSet};
 
 use super::finalizer::input_hash_bytes;
 use super::keyagg;
-use crate::musig2_psbt::{
-    get_input_musig2_agg_path, get_input_musig2_participant_pubkeys, get_input_partial_ecdh_shares,
-    get_output_sp_info, input_outpoint_bytes,
-};
 use psbt::Psbt;
 
 /// Aggregated ECDH share and input pubkey sum for a single scan key.
@@ -56,7 +52,7 @@ pub fn aggregate_ecdh_shares(
     // Discover scan keys from SP outputs.
     let mut scan_keys = Vec::new();
     for output in &psbt.outputs {
-        if let Some((scan_key, _)) = get_output_sp_info(output)? {
+        if let Some((scan_key, _)) = output.sp_info()? {
             if !scan_keys.contains(&scan_key) {
                 scan_keys.push(scan_key);
             }
@@ -121,7 +117,7 @@ pub fn compute_sp_shared_secrets(
     let smallest_outpoint: [u8; 36] = psbt
         .inputs
         .iter()
-        .map(input_outpoint_bytes)
+        .map(|input| input.outpoint_bytes())
         .min()
         .ok_or_else(|| anyhow!("no outpoints"))?;
 
@@ -159,7 +155,7 @@ fn synthesize_partial_ecdh_shares(
     let mut synthesized: HashMap<usize, HashMap<PublicKey, PublicKey>> = HashMap::new();
 
     for (input_idx, input) in psbt.inputs.iter().enumerate() {
-        let partial_shares = get_input_partial_ecdh_shares(input)?;
+        let partial_shares = input.parse_musig2_partial_ecdh_shares()?;
         if partial_shares.is_empty() {
             continue;
         }
@@ -174,7 +170,7 @@ fn synthesize_partial_ecdh_shares(
             ));
         }
 
-        let musig2_info = get_input_musig2_participant_pubkeys(input)?;
+        let musig2_info = input.parse_musig2_participant_pubkeys()?;
         if musig2_info.len() > 1 {
             return Err(anyhow!(
                 "input {input_idx} has multiple MuSig2 aggregate key entries"
@@ -212,7 +208,7 @@ fn synthesize_partial_ecdh_shares(
                         "incomplete or unknown MuSig2 contributors on input {input_idx}"
                     ));
                 }
-                let path = get_input_musig2_agg_path(input);
+                let path = input.musig2_agg_path();
                 let contributions: Vec<(PublicKey, PublicKey)> =
                     entries.iter().map(|(c, s, _)| (*c, *s)).collect();
                 keyagg::aggregate_partial_ecdh_shares(

@@ -16,9 +16,8 @@ use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 
 use psbt::core::utils::to_psbt_dleq;
 use psbt::{generate_dleq_proof, verify_dleq_proof, Psbt};
-use psbt_v2::v2::Output;
+use psbt_v2::v2::{Output, PartialEcdhShareData};
 
-use crate::musig2_psbt::{self as psbt_fields, PartialEcdhShareData};
 use crate::musig2_spdk::{build_psbt, finalize_sp_outputs, signing};
 
 /// Build the 66-byte PSBT_OUT_SP_V0_INFO payload (scan_key || spend_key).
@@ -251,16 +250,14 @@ pub fn construct_psbt(
     // PSBT_IN_TAP_INTERNAL_KEY holds the untweaked aggregate P (BIP-341/BIP-371);
     // the taproot tweak is applied when verifying the output key.
     psbt.inputs[0].tap_internal_key = Some(keys.untweaked_agg_xonly);
-    psbt_fields::set_input_musig2_participant_pubkeys(
-        &mut psbt.inputs[0],
+    psbt.inputs[0].set_musig2_participant_pubkeys(
         &keys.untweaked_agg_pk,
         &[keys.alice_pk, keys.bob_pk, keys.charlie_pk],
     );
     // The aggregate MuSig2 key's [0, DEMO_SP_INDEX] child-derivation path is stored
     // as a TAP_BIP32_DERIVATION entry (BIP-373), not the BIP-376 SP-spend field.
     // The finalizer reads it back to re-derive the aggregate child for ECDH.
-    psbt_fields::set_input_musig2_agg_derivation(
-        &mut psbt.inputs[0],
+    psbt.inputs[0].set_musig2_agg_derivation(
         &keys.untweaked_agg_pk,
         keys.untweaked_agg_xonly,
         0,
@@ -271,8 +268,7 @@ pub fn construct_psbt(
     // pubkeys to aid change detection.
     for output in psbt.outputs.iter_mut() {
         if output.sp_v0_info.is_none() {
-            psbt_fields::set_output_musig2_participant_pubkeys(
-                output,
+            output.set_musig2_participant_pubkeys(
                 &keys.untweaked_agg_pk,
                 &[keys.alice_pk, keys.bob_pk, keys.charlie_pk],
             );
@@ -319,7 +315,7 @@ pub fn add_ecdh_share(
         share: partial_share,
         dleq_proof: to_psbt_dleq(dleq_proof),
     };
-    psbt_fields::add_input_partial_ecdh_share(&mut psbt.inputs[0], &partial);
+    psbt.inputs[0].add_musig2_partial_ecdh_share(&partial);
 
     Ok(())
 }

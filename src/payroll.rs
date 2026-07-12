@@ -11,7 +11,6 @@ use silentpayments::Network as SpNetwork;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::musig2_psbt;
 use crate::musig2_spdk::{build_psbt, keyagg};
 use crate::recipients::{address_amounts, load_recipients, PayrollRecipient};
 use crate::wallet::TreasuryWalletConfig;
@@ -223,8 +222,7 @@ fn construct_initial_psbt(
         script_pubkey: input_keys.p2tr_script.clone(),
     });
     psbt.inputs[0].tap_internal_key = Some(input_keys.plain_child_xonly);
-    musig2_psbt::set_input_musig2_participant_pubkeys(
-        &mut psbt.inputs[0],
+    psbt.inputs[0].set_musig2_participant_pubkeys(
         &input_keys.untweaked_agg_pk,
         &input_keys.participant_pks,
     );
@@ -232,8 +230,7 @@ fn construct_initial_psbt(
     // TAP_BIP32_DERIVATION entry (BIP-373), not in the BIP-376 SP-spend field
     // (which is only for spending inputs that are themselves silent-payment
     // outputs). The finalizer reads it back to re-derive the aggregate for ECDH.
-    musig2_psbt::set_input_musig2_agg_derivation(
-        &mut psbt.inputs[0],
+    psbt.inputs[0].set_musig2_agg_derivation(
         &input_keys.untweaked_agg_pk,
         input_keys.plain_child_xonly,
         input_keys.chain,
@@ -249,8 +246,7 @@ fn construct_initial_psbt(
 
     for output in &mut psbt.outputs {
         if output.sp_v0_info.is_none() {
-            musig2_psbt::set_output_musig2_participant_pubkeys(
-                output,
+            output.set_musig2_participant_pubkeys(
                 &change_keys.untweaked_agg_pk,
                 &change_keys.participant_pks,
             );
@@ -470,7 +466,7 @@ mod tests {
         assert_eq!(*agg_path, DerivationPath::from_str("m/0/0").expect("path"));
         assert_eq!(
             *agg_fp,
-            crate::musig2_psbt::musig2_agg_fingerprint(&input_keys.untweaked_agg_pk)
+            psbt_v2::v2::musig2_agg_fingerprint(&input_keys.untweaked_agg_pk)
         );
         assert!(psbt.inputs[0].sp_spend_bip32_derivations.is_empty());
 

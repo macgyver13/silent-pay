@@ -2,7 +2,6 @@ use bitcoin::Amount;
 use psbt::roles::signer::extract_eligible_input_pubkey;
 use secp256k1::{PublicKey, Secp256k1, XOnlyPublicKey};
 use silent_pay::demo::workflow;
-use silent_pay::musig2_psbt::PSBT_IN_MUSIG2_PARTIAL_DLEQ;
 use silent_pay::recipients::{address_amounts, parse_recipients, recipient_keys};
 use silentpayments::receiving::{Label, Receiver};
 use silentpayments::utils::receiving::PublicTweakData;
@@ -145,13 +144,12 @@ fn rejects_invalid_participant_dleq_proof() {
         workflow::add_ecdh_share(&secp, &mut psbt, name, sk, pk, &scan).expect("share");
     }
 
-    let proof = psbt.inputs[0]
-        .unknowns
+    let (_, proof) = psbt.inputs[0]
+        .musig2_partial_dleq_proofs
         .iter_mut()
-        .find(|(key, _)| key.type_value == PSBT_IN_MUSIG2_PARTIAL_DLEQ)
-        .map(|(_, value)| value)
+        .next()
         .expect("DLEQ proof");
-    proof[0] ^= 1;
+    proof.0[0] ^= 1;
 
     assert!(workflow::derive_sp_output(&secp, &mut psbt).is_err());
 }

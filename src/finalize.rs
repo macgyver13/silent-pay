@@ -17,7 +17,6 @@ use secp256k1::Secp256k1;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::musig2_psbt::{get_input_musig2_agg_path, get_input_musig2_participant_pubkeys};
 use crate::musig2_spdk::finalize_sp_outputs;
 use crate::musig2_spdk::keyagg::build_tweaked_key_agg_ctx;
 use crate::musig2_spdk::signing::aggregate_musig2_sigs;
@@ -50,7 +49,7 @@ pub fn finalize_payroll(psbt_path: impl AsRef<Path>) -> Result<FinalizePayrollRe
         .count();
 
     // Rebuild the tweaked MuSig2 aggregation context from the PSBT's public fields.
-    let mut participants = get_input_musig2_participant_pubkeys(&psbt.inputs[0])?;
+    let mut participants = psbt.inputs[0].parse_musig2_participant_pubkeys()?;
     if participants.len() != 1 {
         return Err(anyhow!(
             "expected exactly one MuSig2 aggregate key on input 0, found {}",
@@ -58,7 +57,7 @@ pub fn finalize_payroll(psbt_path: impl AsRef<Path>) -> Result<FinalizePayrollRe
         ));
     }
     let (_agg_pk, participant_pks) = participants.remove(0);
-    let path = get_input_musig2_agg_path(&psbt.inputs[0]);
+    let path = psbt.inputs[0].musig2_agg_path();
     let (key_agg_ctx, _gacc) = build_tweaked_key_agg_ctx(&secp, &participant_pks, &path)?;
 
     // Aggregate the partial signatures already present in the PSBT and extract the tx.

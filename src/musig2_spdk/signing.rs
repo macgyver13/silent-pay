@@ -1,7 +1,7 @@
 //! MuSig2 signer role (BIP-327 + BIP-373) over native psbt-v2 fields.
 //!
 //! Ported from old `spdk-core::psbt::roles::musig2_signer` (`slznmzkv`), adapted to
-//! operate on `psbt_v2::v2::Input` via [`super::psbt_fields`]. UPSTREAM CANDIDATE.
+//! operate on `psbt_v2::v2::Input` via its native MuSig2 accessors.
 //!
 //! # Byte Boundary Note
 //! The `musig2` crate pins `secp256k1 = "0.31"`; the workspace uses `0.29`. All key
@@ -14,11 +14,6 @@ use musig2::{
 };
 use psbt_v2::v2::Input;
 use secp256k1::{PublicKey, SecretKey};
-
-use crate::musig2_psbt::{
-    add_input_musig2_partial_sig, add_input_musig2_pub_nonce, get_input_musig2_partial_sigs,
-    get_input_musig2_pub_nonces,
-};
 
 /// Generate a MuSig2 nonce for one participant and write the public nonce to the
 /// input. Returns the `SecNonce` — keep it secret and use it exactly once in
@@ -41,7 +36,7 @@ pub fn add_musig2_pub_nonce(
     let pub_nonce: PubNonce = sec_nonce.public_nonce();
     let nonce_arr: [u8; 66] = BinaryEncoding::to_bytes(&pub_nonce);
 
-    add_input_musig2_pub_nonce(input, participant_pk, agg_pk, nonce_arr);
+    input.add_musig2_pub_nonce(participant_pk, agg_pk, nonce_arr);
     Ok(sec_nonce)
 }
 
@@ -69,7 +64,7 @@ pub fn add_musig2_partial_sig(
     .map_err(|e| anyhow!("partial signing failed: {e}"))?;
 
     let sig_bytes: [u8; 32] = partial_sig.serialize();
-    add_input_musig2_partial_sig(input, participant_pk, agg_pk, sig_bytes);
+    input.add_musig2_partial_sig(participant_pk, agg_pk, sig_bytes);
     Ok(())
 }
 
@@ -82,7 +77,7 @@ pub fn aggregate_musig2_sigs(
 ) -> Result<()> {
     let agg_nonce = collect_agg_nonce(input)?;
 
-    let partial_sigs_raw = get_input_musig2_partial_sigs(input)?;
+    let partial_sigs_raw = input.parse_musig2_partial_sigs()?;
     if partial_sigs_raw.is_empty() {
         return Err(anyhow!("no MuSig2 partial signatures present"));
     }
@@ -114,7 +109,7 @@ pub fn aggregate_musig2_sigs(
 // ===== internal helpers =====
 
 fn collect_agg_nonce(input: &Input) -> Result<AggNonce> {
-    let nonces_raw = get_input_musig2_pub_nonces(input)?;
+    let nonces_raw = input.parse_musig2_pub_nonces()?;
     if nonces_raw.is_empty() {
         return Err(anyhow!("no MuSig2 nonces present"));
     }

@@ -14,7 +14,6 @@ use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 use std::collections::HashMap;
 
 use super::shares::{aggregate_ecdh_shares, compute_sp_shared_secrets};
-use crate::musig2_psbt::get_output_sp_info;
 
 fn tagged(tag: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     let tag_hash = sha256::Hash::hash(tag);
@@ -68,7 +67,7 @@ pub fn finalize_sp_outputs(secp: &Secp256k1<secp256k1::All>, psbt: &mut Psbt) ->
     let mut scan_key_output_indices: HashMap<PublicKey, u32> = HashMap::new();
 
     for output_idx in 0..psbt.outputs.len() {
-        let Some((scan_key, spend_key)) = get_output_sp_info(&psbt.outputs[output_idx])? else {
+        let Some((scan_key, spend_key)) = psbt.outputs[output_idx].sp_info()? else {
             continue;
         };
         let shared_secret = shared_secrets

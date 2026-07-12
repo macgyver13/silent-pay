@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 
 use crate::demo::recipients::load_demo_recipients;
 use crate::demo::workflow::{self, KeySetup};
-use crate::musig2_psbt::get_output_sp_info;
 use crate::recipients::{address_amounts, load_recipients};
 
 const FIXTURE_PREV_TXID_HEX: &str =
@@ -410,7 +409,7 @@ fn payroll_outputs(
 ) -> Result<Vec<PayrollOutput>> {
     let mut outputs = Vec::new();
     for (idx, output) in psbt.outputs.iter().enumerate() {
-        let Some((scan, spend)) = get_output_sp_info(output)? else {
+        let Some((scan, spend)) = output.sp_info()? else {
             continue;
         };
         if let Some((addr, amount)) = recipients
