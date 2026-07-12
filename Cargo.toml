@@ -39,3 +39,11 @@ path = "src/bin/demo/build_payroll.rs"
 [[bin]]
 name = "scan_recipients"
 path = "src/bin/demo/scan_recipients.rs"
+
+[[bin]]
+name = "verify_receipt"
+path = "src/bin/demo/verify_receipt.rs"
+
+[[bin]]
+name = "gen_demo_recipients"
+path = "src/bin/demo/gen_demo_recipients.rs"

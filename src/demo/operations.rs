@@ -4,17 +4,20 @@ use bitcoin::key::XOnlyPublicKey;
 use bitcoin::{Amount, Txid};
 use psbt::roles::signer::extract_eligible_input_pubkey;
 use psbt::Psbt as SilentPaymentPsbt;
-use secp256k1::{PublicKey, Secp256k1};
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use silentpayments::receiving::{Label, Receiver};
 use silentpayments::utils::receiving::PublicTweakData;
 use silentpayments::utils::OutPoint as SpOutPoint;
-use silentpayments::{Network, SpVersion, TransactionInputs, TransactionSharedSecret};
+use silentpayments::{
+    SilentPaymentAddress, SpVersion, TransactionInputs, TransactionSharedSecret,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::demo::recipients::load_demo_recipients;
 use crate::demo::workflow::{self, KeySetup};
 use crate::musig2_psbt::get_output_sp_info;
-use crate::recipients::{address_amounts, load_recipients, recipient_keys};
+use crate::recipients::{address_amounts, load_recipients};
 
 const FIXTURE_PREV_TXID_HEX: &str =
     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
@@ -87,6 +90,19 @@ pub struct ScanRecipientsResult {
     pub recipient_results: Vec<RecipientScanResult>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReceiptDetection {
+    pub output_index: usize,
+    pub amount_sat: u64,
+    pub xonly_hex: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifyReceiptResult {
+    pub candidate_outputs: usize,
+    pub detections: Vec<ReceiptDetection>,
+}
+
 pub fn build_payroll(config: BuildPayrollConfig) -> Result<BuildPayrollResult> {
     fs::create_dir_all(&config.out_dir)
         .with_context(|| format!("failed to create {}", config.out_dir.display()))?;
@@ -137,13 +153,130 @@ pub fn scan_recipients(
     psbt_path: impl AsRef<Path>,
     recipients_path: impl AsRef<Path>,
 ) -> Result<ScanRecipientsResult> {
-    let recipients = load_recipients(recipients_path)?;
+    let targets = load_demo_recipients(recipients_path)?;
     let psbt_path = psbt_path.as_ref();
     let secp = Secp256k1::new();
     let psbt_bytes = fs::read(psbt_path)
         .with_context(|| format!("failed to read PSBT {}", psbt_path.display()))?;
     let psbt = SilentPaymentPsbt::deserialize(&psbt_bytes).context("failed to parse PSBT")?;
 
+    let (tweak_data, candidates) = load_scan_context(&secp, &psbt)?;
+    let candidate_xonly: Vec<_> = candidates.iter().map(|(_, x, _)| *x).collect();
+
+    let mut recipient_results = Vec::new();
+    for (idx, target) in targets.iter().enumerate() {
+        let scan_pk = PublicKey::from_secret_key(&secp, &target.scan_sk);
+        let spend_pk = target.address.get_spend_key();
+        let receiver = Receiver::new(
+            SpVersion::ZERO,
+            scan_pk,
+            spend_pk,
+            Label::new(target.scan_sk, 0),
+            target.address.get_network(),
+        )
+        .map_err(|e| anyhow::anyhow!("Receiver::new: {e}"))?;
+
+        let shared_secret =
+            TransactionSharedSecret::new_from_public_tweak_data(&secp, &tweak_data, &target.scan_sk)
+                .map_err(|e| anyhow::anyhow!("shared secret: {e}"))?;
+        let found = receiver
+            .scan_transaction(&shared_secret, &candidate_xonly)
+            .map_err(|e| anyhow::anyhow!("scan_transaction: {e}"))?;
+
+        let mut detections = Vec::new();
+        for xonly in found.values().flat_map(|m| m.keys().copied()) {
+            if let Some((output_index, _, amount_sat)) = candidates
+                .iter()
+                .find(|(_, candidate, _)| *candidate == xonly)
+            {
+                detections.push(DetectedOutput {
+                    output_index: *output_index,
+                    amount_sat: *amount_sat,
+                    xonly_hex: hex::encode(xonly.serialize()),
+                    amount_matches: *amount_sat == target.amount.to_sat(),
+                });
+            }
+        }
+
+        recipient_results.push(RecipientScanResult {
+            recipient_index: idx,
+            label: target.label.clone(),
+            expected_amount_sat: target.amount.to_sat(),
+            detections,
+        });
+    }
+
+    if recipient_results.iter().any(|result| {
+        result.detections.is_empty() || result.detections.iter().any(|d| !d.amount_matches)
+    }) {
+        bail!("one or more recipients could not detect the expected output");
+    }
+
+    Ok(ScanRecipientsResult {
+        candidate_outputs: candidate_xonly.len(),
+        recipient_results,
+    })
+}
+
+/// Verify receipt of a silent payment for a single scan key, without a seed or
+/// spend key: BIP352 watch-only scanning. The scan private key and the recipient
+/// address (which carries the public spend key) are all that scanning requires.
+pub fn verify_receipt(
+    secp: &Secp256k1<secp256k1::All>,
+    psbt: &SilentPaymentPsbt,
+    address: &SilentPaymentAddress,
+    scan_sk: SecretKey,
+) -> Result<VerifyReceiptResult> {
+    let scan_pk = PublicKey::from_secret_key(secp, &scan_sk);
+    if address.get_scan_key() != scan_pk {
+        bail!("scan key does not match the address scan key");
+    }
+    let spend_pk = address.get_spend_key();
+
+    let (tweak_data, candidates) = load_scan_context(secp, psbt)?;
+    let candidate_xonly: Vec<_> = candidates.iter().map(|(_, x, _)| *x).collect();
+
+    let receiver = Receiver::new(
+        SpVersion::ZERO,
+        scan_pk,
+        spend_pk,
+        Label::new(scan_sk, 0),
+        address.get_network(),
+    )
+    .map_err(|e| anyhow::anyhow!("Receiver::new: {e}"))?;
+
+    let shared_secret =
+        TransactionSharedSecret::new_from_public_tweak_data(secp, &tweak_data, &scan_sk)
+            .map_err(|e| anyhow::anyhow!("shared secret: {e}"))?;
+    let found = receiver
+        .scan_transaction(&shared_secret, &candidate_xonly)
+        .map_err(|e| anyhow::anyhow!("scan_transaction: {e}"))?;
+
+    let mut detections = Vec::new();
+    for xonly in found.values().flat_map(|m| m.keys().copied()) {
+        if let Some((output_index, _, amount_sat)) =
+            candidates.iter().find(|(_, candidate, _)| *candidate == xonly)
+        {
+            detections.push(ReceiptDetection {
+                output_index: *output_index,
+                amount_sat: *amount_sat,
+                xonly_hex: hex::encode(xonly.serialize()),
+            });
+        }
+    }
+
+    Ok(VerifyReceiptResult {
+        candidate_outputs: candidate_xonly.len(),
+        detections,
+    })
+}
+
+/// Build the recipient-key-independent scan context from a parsed PSBT: the
+/// public tweak data (from eligible inputs) and the candidate P2TR outputs.
+fn load_scan_context(
+    secp: &Secp256k1<secp256k1::All>,
+    psbt: &SilentPaymentPsbt,
+) -> Result<(PublicTweakData, Vec<(usize, secp256k1::XOnlyPublicKey, u64)>)> {
     let mut tx_inputs = TransactionInputs::with_capacity(psbt.inputs.len());
     let mut eligible_count = 0usize;
     for input in &psbt.inputs {
@@ -168,7 +301,7 @@ pub fn scan_recipients(
         bail!("no eligible inputs to derive tweak data");
     }
 
-    let tweak_data = PublicTweakData::new(&secp, &tx_inputs)
+    let tweak_data = PublicTweakData::new(secp, &tx_inputs)
         .map_err(|e| anyhow::anyhow!("calculate tweak data: {e}"))?;
 
     let mut candidates = Vec::new();
@@ -180,65 +313,8 @@ pub fn scan_recipients(
             candidates.push((idx, xonly, output.amount.to_sat()));
         }
     }
-    let candidate_xonly: Vec<_> = candidates.iter().map(|(_, x, _)| *x).collect();
 
-    let mut recipient_results = Vec::new();
-    for (idx, recipient) in recipients.iter().enumerate() {
-        let seed = recipient.seed.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("recipient[{idx}] has no seed_hex; cannot receiver-scan")
-        })?;
-        let (scan_sk, spend_sk) = recipient_keys(seed);
-        let scan_pk = PublicKey::from_secret_key(&secp, &scan_sk);
-        let spend_pk = PublicKey::from_secret_key(&secp, &spend_sk);
-        let receiver = Receiver::new(
-            SpVersion::ZERO,
-            scan_pk,
-            spend_pk,
-            Label::new(scan_sk, 0),
-            Network::Mainnet,
-        )
-        .map_err(|e| anyhow::anyhow!("Receiver::new: {e}"))?;
-
-        let shared_secret =
-            TransactionSharedSecret::new_from_public_tweak_data(&secp, &tweak_data, &scan_sk)
-                .map_err(|e| anyhow::anyhow!("shared secret: {e}"))?;
-        let found = receiver
-            .scan_transaction(&shared_secret, &candidate_xonly)
-            .map_err(|e| anyhow::anyhow!("scan_transaction: {e}"))?;
-
-        let mut detections = Vec::new();
-        for xonly in found.values().flat_map(|m| m.keys().copied()) {
-            if let Some((output_index, _, amount_sat)) = candidates
-                .iter()
-                .find(|(_, candidate, _)| *candidate == xonly)
-            {
-                detections.push(DetectedOutput {
-                    output_index: *output_index,
-                    amount_sat: *amount_sat,
-                    xonly_hex: hex::encode(xonly.serialize()),
-                    amount_matches: *amount_sat == recipient.amount.to_sat(),
-                });
-            }
-        }
-
-        recipient_results.push(RecipientScanResult {
-            recipient_index: idx,
-            label: recipient.label.clone(),
-            expected_amount_sat: recipient.amount.to_sat(),
-            detections,
-        });
-    }
-
-    if recipient_results.iter().any(|result| {
-        result.detections.is_empty() || result.detections.iter().any(|d| !d.amount_matches)
-    }) {
-        bail!("one or more recipients could not detect the expected output");
-    }
-
-    Ok(ScanRecipientsResult {
-        candidate_outputs: candidate_xonly.len(),
-        recipient_results,
-    })
+    Ok((tweak_data, candidates))
 }
 
 fn add_payroll_tap_derivations(psbt: &mut SilentPaymentPsbt, keys: &KeySetup) -> Result<()> {
