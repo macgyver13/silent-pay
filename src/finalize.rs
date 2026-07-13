@@ -17,9 +17,9 @@ use secp256k1::Secp256k1;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::musig2_spdk::finalize_sp_outputs;
-use crate::musig2_spdk::keyagg::build_tweaked_key_agg_ctx;
-use crate::musig2_spdk::signing::aggregate_musig2_sigs;
+use psbt::musig2::finalize_sp_outputs;
+use psbt::musig2::keyagg::build_tweaked_key_agg_ctx;
+use psbt::roles::musig2_signer::aggregate_musig2_sigs;
 
 #[derive(Debug, Clone)]
 pub struct FinalizePayrollResult {

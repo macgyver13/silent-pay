@@ -18,7 +18,8 @@ use psbt::core::utils::to_psbt_dleq;
 use psbt::{generate_dleq_proof, verify_dleq_proof, Psbt};
 use psbt_v2::v2::{Output, PartialEcdhShareData};
 
-use crate::musig2_spdk::{build_psbt, finalize_sp_outputs, signing};
+use psbt::musig2::{build_psbt, finalize_sp_outputs};
+use psbt::roles::musig2_signer as signing;
 
 /// Build the 66-byte PSBT_OUT_SP_V0_INFO payload (scan_key || spend_key).
 fn sp_v0_info_bytes(address: &SilentPaymentAddress) -> [u8; 66] {

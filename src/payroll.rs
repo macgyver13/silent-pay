@@ -11,9 +11,9 @@ use silentpayments::Network as SpNetwork;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::musig2_spdk::{build_psbt, keyagg};
 use crate::recipients::{address_amounts, load_recipients, PayrollRecipient};
 use crate::wallet::TreasuryWalletConfig;
+use psbt::musig2::{build_psbt, keyagg};
 
 /// BIP-32 external (receive) chain: synthetic `/0/*` leaf on the aggregate key.
 pub const RECEIVE_CHAIN: u32 = 0;
