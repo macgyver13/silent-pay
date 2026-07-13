@@ -3,7 +3,7 @@ _default:
 
 [group('silent-pay')]
 pay:
-  cargo r --bin gui
+  cargo r
 
 coldcard_path := home_directory() / "src/coldcard-firmware/testing/data"
 cc_sp_out := "/tmp/cc-sp-out"

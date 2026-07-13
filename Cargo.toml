@@ -29,5 +29,10 @@ silentpayments = { git = "https://github.com/macgyver13/spdk.git", branch = "mus
 toml = "0.9.12"
 
 [[bin]]
-name = "gui"
+name = "silent-pay"
 path = "src/bin/gui.rs"
+
+[package.metadata.bundle]
+name = "SilentPay"
+identifier = "xyz.spmac.silent-pay"
+icon = ["assets/icon.icns"]

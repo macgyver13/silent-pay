@@ -18,7 +18,7 @@ correct.
 
 The workspace has two crates:
 
-- `silent-pay` — the library plus the `gui` binary (the desktop app).
+- `silent-pay` — the library plus the `silent-pay` binary (the desktop app).
 - `sp-demo` — deterministic demo/fixture CLIs for testing and receiver-side
   validation.
 
@@ -69,8 +69,7 @@ saved back to the app config so the next launch picks them up.
 
 ## Setup
 
-1. Clone the repository. The forked `spdk` and `rust-psbt` dependencies are
-   fetched automatically by Cargo from their `musig2-working` branches.
+1. Clone the repository.
 2. Install `just`.
 3. For broadcasting, point the app at a reachable Bitcoin Core node (RPC URL and
    cookie file or user/password) and select the matching network.
@@ -135,7 +134,7 @@ Each recipient is a `[[recipients]]` record:
 | `label`        | Human-readable identifier for the recipient.                      |
 | `amount_sat`   | Amount to pay, in satoshis.                                        |
 | `address`      | The recipient's Silent Payment address (`tsp1…` on testnet).      |
-| `scan_key_hex` | The recipient's scan private key, hex. Demo/receiver-side only.   |
+| `scan_key_hex` | The recipient's scan private key, hex. Demo/receiver-side **only**.   |
 
 `scan_key_hex` is present so the demo can scan and verify receipts from the
 receiver's perspective. Production sender configs must not carry recipient scan

@@ -146,6 +146,7 @@ export component PayrollGui inherits Window {
     max-width: 4096px;
     max-height: 4096px;
 
+    in-out property <string> app_version: "";
     in-out property <string> wallet_path: "wallet.toml";
     in-out property <string> wallet_network: "testnet";
     in-out property <string> data_dir: ".";
@@ -377,6 +378,18 @@ export component PayrollGui inherits Window {
                         spacing: 14px;
                         SectionHeader { title: "Configuration"; }
 
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "Version"; }
+                            Text {
+                                text: root.app_version;
+                                height: 40px;
+                                color: #d5d5dc;
+                                font-size: 14px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                        }
                         HorizontalLayout {
                             spacing: 12px;
                             FieldLabel { label: "Network"; }

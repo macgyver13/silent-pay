@@ -64,7 +64,7 @@ Detailed prerequisites and a full workflow walkthrough are in
 
 The workspace has two crates:
 
-- `silent-pay` — the library and the `gui` binary (the app above).
+- `silent-pay` — the library and the `silent-pay` binary (the app above).
 - `sp-demo` — deterministic demo/fixture CLIs used for testing and receiver-side
   validation.
 
