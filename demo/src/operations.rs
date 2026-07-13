@@ -8,15 +8,13 @@ use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use silentpayments::receiving::{Label, Receiver};
 use silentpayments::utils::receiving::PublicTweakData;
 use silentpayments::utils::OutPoint as SpOutPoint;
-use silentpayments::{
-    SilentPaymentAddress, SpVersion, TransactionInputs, TransactionSharedSecret,
-};
+use silentpayments::{SilentPaymentAddress, SpVersion, TransactionInputs, TransactionSharedSecret};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::demo::recipients::load_demo_recipients;
-use crate::demo::workflow::{self, KeySetup};
-use crate::recipients::{address_amounts, load_recipients};
+use crate::recipients::load_demo_recipients;
+use crate::workflow::{self, KeySetup};
+use silent_pay::recipients::{address_amounts, load_recipients};
 
 const FIXTURE_PREV_TXID_HEX: &str =
     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
@@ -175,9 +173,12 @@ pub fn scan_recipients(
         )
         .map_err(|e| anyhow::anyhow!("Receiver::new: {e}"))?;
 
-        let shared_secret =
-            TransactionSharedSecret::new_from_public_tweak_data(&secp, &tweak_data, &target.scan_sk)
-                .map_err(|e| anyhow::anyhow!("shared secret: {e}"))?;
+        let shared_secret = TransactionSharedSecret::new_from_public_tweak_data(
+            &secp,
+            &tweak_data,
+            &target.scan_sk,
+        )
+        .map_err(|e| anyhow::anyhow!("shared secret: {e}"))?;
         let found = receiver
             .scan_transaction(&shared_secret, &candidate_xonly)
             .map_err(|e| anyhow::anyhow!("scan_transaction: {e}"))?;
@@ -253,8 +254,9 @@ pub fn verify_receipt(
 
     let mut detections = Vec::new();
     for xonly in found.values().flat_map(|m| m.keys().copied()) {
-        if let Some((output_index, _, amount_sat)) =
-            candidates.iter().find(|(_, candidate, _)| *candidate == xonly)
+        if let Some((output_index, _, amount_sat)) = candidates
+            .iter()
+            .find(|(_, candidate, _)| *candidate == xonly)
         {
             detections.push(ReceiptDetection {
                 output_index: *output_index,
@@ -275,7 +277,10 @@ pub fn verify_receipt(
 fn load_scan_context(
     secp: &Secp256k1<secp256k1::All>,
     psbt: &SilentPaymentPsbt,
-) -> Result<(PublicTweakData, Vec<(usize, secp256k1::XOnlyPublicKey, u64)>)> {
+) -> Result<(
+    PublicTweakData,
+    Vec<(usize, secp256k1::XOnlyPublicKey, u64)>,
+)> {
     let mut tx_inputs = TransactionInputs::with_capacity(psbt.inputs.len());
     let mut eligible_count = 0usize;
     for input in &psbt.inputs {

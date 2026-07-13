@@ -1,8 +1,8 @@
 use anyhow::{bail, Context, Result};
 use psbt::Psbt as SilentPaymentPsbt;
 use secp256k1::{Secp256k1, SecretKey};
-use silent_pay::demo::verify_receipt;
 use silentpayments::SilentPaymentAddress;
+use sp_demo::verify_receipt;
 use std::fs;
 use std::path::PathBuf;
 

@@ -4259,13 +4259,11 @@ name = "silent-pay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bip39",
  "bitcoin",
  "bitcoincore-rpc",
  "copypasta",
  "hex",
  "hmac",
- "musig2",
  "psbt",
  "psbt-v2",
  "rfd",
@@ -4530,6 +4528,26 @@ dependencies = [
  "web-sys",
  "windows-sys 0.61.2",
  "x11rb",
+]
+
+[[package]]
+name = "sp-demo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bip39",
+ "bitcoin",
+ "hex",
+ "hmac",
+ "musig2",
+ "psbt",
+ "psbt-v2",
+ "secp256k1 0.29.1",
+ "serde",
+ "sha2",
+ "silent-pay",
+ "silentpayments",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

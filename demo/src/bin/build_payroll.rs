@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use silent_pay::demo::{build_payroll, BuildPayrollConfig};
+use sp_demo::{build_payroll, BuildPayrollConfig};
 use std::path::PathBuf;
 
 fn main() -> Result<()> {

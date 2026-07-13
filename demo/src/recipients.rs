@@ -1,7 +1,7 @@
 //! Demo-only recipient config that carries a watch-only scan key + silent
 //! payment address (no seed, no spend key). Generated deterministically from
 //! `RECIPIENT_SEEDS` for running simulated demos. Production recipient parsing
-//! in `crate::recipients` is intentionally left untouched.
+//! in `silent_pay::recipients` is intentionally left untouched.
 
 use anyhow::{bail, Context, Result};
 use bitcoin::Amount;
@@ -11,7 +11,7 @@ use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 use std::fs;
 use std::path::Path;
 
-use crate::recipients::recipient_keys;
+use silent_pay::recipients::recipient_keys;
 
 /// Demo recipient seeds paired with their payment amount (sats). Each seed
 /// deterministically derives a scan/spend key pair via `recipient_keys`.
@@ -77,7 +77,10 @@ pub fn generate_demo_recipients() -> Vec<DemoRecipientEntry> {
         .collect()
 }
 
-pub fn save_demo_recipients(path: impl AsRef<Path>, recipients: &[DemoRecipientEntry]) -> Result<()> {
+pub fn save_demo_recipients(
+    path: impl AsRef<Path>,
+    recipients: &[DemoRecipientEntry],
+) -> Result<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {

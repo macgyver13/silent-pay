@@ -1,9 +1,5 @@
-[workspace]
-members = [".", "demo"]
-resolver = "2"
-
 [package]
-name = "silent-pay"
+name = "sp-demo"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -11,21 +7,36 @@ autobins = false
 
 [dependencies]
 anyhow = "1.0"
-bitcoincore-rpc = "0.19.0"
+bip39 = "2.0"
 bitcoin = "0.32.6"
-copypasta = "0.10.2"
 hex = "0.4"
 hmac = "0.12"
+musig2 = { version = "0.3.1", features = ["secp256k1"] }
 psbt = { git = "https://github.com/macgyver13/spdk.git", branch = "musig2-working" }
 psbt-v2 = { git = "https://gitea.bitcoin.ninja/macgyver/rust-psbt.git", branch = "musig2-working", features = ["miniscript", "musig2", "silent-payments"] }
-rfd = "0.15.4"
 secp256k1 = { version = "0.29", features = ["rand", "global-context", "serde"] }
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
-slint = "1.16.1"
+silent-pay = { path = ".." }
 silentpayments = { git = "https://github.com/macgyver13/spdk.git", branch = "musig2-working" }
 toml = "0.9.12"
 
 [[bin]]
-name = "gui"
-path = "src/bin/gui.rs"
+name = "finalize"
+path = "src/bin/finalize_payroll.rs"
+
+[[bin]]
+name = "payroll"
+path = "src/bin/build_payroll.rs"
+
+[[bin]]
+name = "scan_recipients"
+path = "src/bin/scan_recipients.rs"
+
+[[bin]]
+name = "verify_receipt"
+path = "src/bin/verify_receipt.rs"
+
+[[bin]]
+name = "gen_demo_recipients"
+path = "src/bin/gen_demo_recipients.rs"

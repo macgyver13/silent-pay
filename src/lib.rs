@@ -1,4 +1,3 @@
-pub mod demo;
 pub mod finalize;
 pub mod payroll;
 pub mod recipients;

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use silent_pay::demo::{generate_demo_recipients, save_demo_recipients};
+use sp_demo::{generate_demo_recipients, save_demo_recipients};
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
