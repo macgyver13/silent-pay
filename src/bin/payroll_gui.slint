@@ -102,6 +102,31 @@ component FieldLabel inherits Text {
     vertical-alignment: center;
 }
 
+component LineEditLabel inherits Rectangle {
+    in-out property <string> text;
+    callback edited(string);
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: #34343f;
+    background: #353535;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+
+        TextInput {
+            text <=> root.text;
+            color: #787881;
+            font-size: 14px;
+            font-weight: 700;
+            vertical-alignment: center;
+            edited => {
+                root.edited(self.text);
+            }
+        }
+    }
+}
+
 component Divider inherits Rectangle {
     height: 1px;
     background: #27272f;
@@ -149,7 +174,7 @@ export component PayrollGui inherits Window {
     in-out property <string> pending_change_vout: "";
     in-out property <string> pending_change_amount_sat: "";
     in-out property <string> pending_change_derivation_index: "";
-    in-out property <string> pending_change_label: "payroll change";
+    in-out property <string> pending_change_label: "";
     in-out property <string> recipients_path: "recipients.toml";
     in-out property <string> recipient_rows: "";
     in-out property <string> total_payroll_sat: "0";
@@ -163,7 +188,7 @@ export component PayrollGui inherits Window {
     in-out property <string> prevout_amount_sat: "";
     in-out property <string> miner_fee_sat: "1000";
     in-out property <string> suggested_fee_sat: "";
-    in-out property <string> psbt_path: "output/payroll.psbt";
+    in-out property <string> psbt_path: "";
     in-out property <int> active_tab: 1;
     in-out property <string> finalize_psbt_path: "output/payroll-signed.psbt";
     in-out property <string> final_tx_hex_path: "";
@@ -335,46 +360,61 @@ export component PayrollGui inherits Window {
                         spacing: 14px;
                         SectionHeader { title: "Wallet"; }
                         HorizontalLayout {
-                            spacing: 12px;
-                            FieldLabel { label: "Receive"; }
-                            Text {
-                                text: root.receive_address;
-                                height: 40px;
-                                color: #d5d5dc;
-                                font-size: 17px;
-                                vertical-alignment: center;
-                            }
-                            ActionButton { width: 96px; text: "Copy"; clicked => { root.copy_receive_address(); } }
-                            FieldLabel { label: "Last Index"; width: 92px; }
-                            LineEdit {
-                                text <=> root.last_derivation_index;
-                                height: 40px;
-                                width: 96px;
-                                edited(text) => {
-                                    root.last_derivation_index = text;
-                                    root.recalculate_receive_address();
+                            spacing: 24px;
+                            VerticalLayout {
+                                spacing: 14px;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel { label: "Receive"; }
+                                    Text {
+                                        text: root.receive_address;
+                                        height: 40px;
+                                        color: #d5d5dc;
+                                        font-size: 17px;
+                                        vertical-alignment: center;
+                                    }
+                                    ActionButton { width: 96px; text: "Copy"; clicked => { root.copy_receive_address(); } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel { label: "Change"; }
+                                    Text {
+                                        text: root.change_address;
+                                        height: 40px;
+                                        color: #d5d5dc;
+                                        font-size: 17px;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
-                            FieldLabel { label: "Change Index"; width: 112px; }
-                            LineEdit {
-                                text <=> root.change_derivation_index;
-                                height: 40px;
-                                width: 96px;
-                                edited(text) => {
-                                    root.change_derivation_index = text;
-                                    root.recalculate_receive_address();
+                            VerticalLayout {
+                                spacing: 14px;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel { label: "Receive Index"; width: 112px; }
+                                    LineEditLabel {
+                                        text <=> root.last_derivation_index;
+                                        height: 40px;
+                                        width: 56px;
+                                        edited(text) => {
+                                            root.last_derivation_index = text;
+                                            root.recalculate_receive_address();
+                                        }
+                                    }
                                 }
-                            }
-                        }
-                        HorizontalLayout {
-                            spacing: 12px;
-                            FieldLabel { label: "Change"; }
-                            Text {
-                                text: root.change_address;
-                                height: 40px;
-                                color: #d5d5dc;
-                                font-size: 17px;
-                                vertical-alignment: center;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel { label: "Change Index"; width: 112px; }
+                                    LineEditLabel {
+                                        text <=> root.change_derivation_index;
+                                        height: 40px;
+                                        width: 56px;
+                                        edited(text) => {
+                                            root.change_derivation_index = text;
+                                            root.recalculate_receive_address();
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -383,39 +423,47 @@ export component PayrollGui inherits Window {
 
                     VerticalLayout {
                         spacing: 14px;
-                        SectionHeader {
-                            title: "UTXOs";
-                            show-toggle: true;
-                            shown: root.show_utxos;
-                            toggle => {
-                                root.show_utxos = !root.show_utxos;
+                        HorizontalLayout {
+                            height: 48px;
+                            Text {
+                                text: "UTXOs";
+                                color: #f5f5f7;
+                                font-size: 22px;
+                                font-weight: 800;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { width: 24px; }
+                            NavButton {
+                                width: 84px;
+                                text: "UTXOs";
+                                icon: "";
+                                selected: root.active_utxo_tab == 0;
+                                clicked => {
+                                    root.active_utxo_tab = 0;
+                                }
+                            }
+                            Rectangle { width: 12px; }
+                            NavButton {
+                                width: 92px;
+                                text: "History";
+                                icon: "";
+                                selected: root.active_utxo_tab == 1;
+                                clicked => {
+                                    root.active_utxo_tab = 1;
+                                }
+                            }
+                            Rectangle {}
+                            ActionButton {
+                                width: 80px;
+                                text: root.show_utxos ? "Hide" : "Show";
+                                clicked => {
+                                    root.show_utxos = !root.show_utxos;
+                                }
                             }
                         }
 
                         if root.show_utxos : VerticalLayout {
                             spacing: 14px;
-                            HorizontalLayout {
-                                spacing: 12px;
-                                NavButton {
-                                    width: 84px;
-                                    text: "UTXOs";
-                                    icon: "";
-                                    selected: root.active_utxo_tab == 0;
-                                    clicked => {
-                                        root.active_utxo_tab = 0;
-                                    }
-                                }
-                                NavButton {
-                                    width: 92px;
-                                    text: "History";
-                                    icon: "";
-                                    selected: root.active_utxo_tab == 1;
-                                    clicked => {
-                                        root.active_utxo_tab = 1;
-                                    }
-                                }
-                            }
-
                             if root.active_utxo_tab == 0 : VerticalLayout {
                                 spacing: 14px;
                                 HorizontalLayout {
@@ -430,15 +478,15 @@ export component PayrollGui inherits Window {
                                     ActionButton { width: 80px; text: "Save"; clicked => { root.save_utxos(); } }
                                 }
                                 StandardTableView {
-                                    height: 136px;
+                                    height: 264px;
                                     rows <=> root.available_utxo_rows;
                                     current-row <=> root.selected_available_utxo_row;
                                     columns: [
                                         { title: "Txid", min-width: 560px, width: 570px, horizontal-stretch: 1 },
                                         { title: "Vout", min-width: 90px, width: 90px, horizontal-stretch: 0 },
-                                        { title: "Amount sat", min-width: 120px, width: 130px, horizontal-stretch: 0 },
                                         { title: "Chain", min-width: 90px, width: 90px, horizontal-stretch: 0 },
                                         { title: "Index", min-width: 70px, width: 70px, horizontal-stretch: 0 },
+                                        { title: "Amount sats", min-width: 120px, width: 130px, horizontal-stretch: 0 },
                                         { title: "Label", min-width: 160px, width: 280px, horizontal-stretch: 1 },
                                     ];
                                     current-row-changed(row) => {
@@ -452,9 +500,9 @@ export component PayrollGui inherits Window {
                                 columns: [
                                     { title: "Txid", min-width: 560px, width: 570px, horizontal-stretch: 1 },
                                     { title: "Vout", min-width: 90px, width: 90px, horizontal-stretch: 0 },
-                                    { title: "Amount sat", min-width: 120px, width: 130px, horizontal-stretch: 0 },
                                     { title: "Chain", min-width: 90px, width: 90px, horizontal-stretch: 0 },
                                     { title: "Index", min-width: 70px, width: 70px, horizontal-stretch: 0 },
+                                    { title: "Amount sats", min-width: 120px, width: 130px, horizontal-stretch: 0 },
                                     { title: "Label", min-width: 160px, width: 280px, horizontal-stretch: 1 },
                                 ];
                             }
@@ -469,25 +517,25 @@ export component PayrollGui inherits Window {
                         HorizontalLayout {
                             spacing: 12px;
                             FieldLabel { label: "Txid"; }
-                            LineEdit { text <=> root.txid; height: 40px; }
+                            LineEdit { text <=> root.txid; height: 40px; preferred-width: 600px; }
                         }
                         HorizontalLayout {
                             spacing: 12px;
                             FieldLabel { label: "Vout"; }
-                            LineEdit { text <=> root.vout; height: 40px; width: 96px; }
+                            LineEditLabel { text <=> root.vout; height: 40px; width: 56px; }
                             FieldLabel { label: "Chain"; width: 56px; }
-                            LineEdit { text <=> root.utxo_chain; height: 40px; width: 56px; }
+                            LineEditLabel { text <=> root.utxo_chain; height: 40px; width: 56px; }
                             FieldLabel { label: "UTXO Index"; width: 96px; }
-                            LineEdit { text <=> root.utxo_derivation_index; height: 40px; width: 96px; }
-                            FieldLabel { label: "Amount sat"; width: 96px; }
+                            LineEditLabel { text <=> root.utxo_derivation_index; height: 40px; width: 56px; }
+                            FieldLabel { label: "Amount sats"; width: 96px; }
                             LineEdit { text <=> root.prevout_amount_sat; height: 40px; width: 150px; }
-                            FieldLabel { label: "Fee sat"; width: 72px; }
+                            FieldLabel { label: "Fee sats"; width: 72px; }
                             LineEdit { text <=> root.miner_fee_sat; height: 40px; width: 150px; }
                         }
                         HorizontalLayout {
                             spacing: 12px;
-                            FieldLabel { label: "PSBT"; }
-                            LineEdit { text <=> root.psbt_path; height: 40px; }
+                            FieldLabel { label: "PSBT Path"; }
+                            LineEdit { text <=> root.psbt_path; height: 40px; preferred-width: 600px; }
                             ActionButton { width: 150px; text: "Create PSBT"; tone: "primary"; clicked => { root.save_psbt(); } }
                         }
                     }

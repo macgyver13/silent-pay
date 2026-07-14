@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::{Address, Amount, Network, Transaction, Txid};
+use chrono::{Local, NaiveDate};
 use copypasta::{ClipboardContext, ClipboardProvider};
 use psbt::Psbt as SilentPaymentPsbt;
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,9 @@ use silent_pay::{
     RECEIVE_CHAIN,
 };
 use silentpayments::Network as SpNetwork;
-use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, Timer, TimerMode, VecModel};
+use slint::{
+    ComponentHandle, ModelRc, SharedString, StandardListViewItem, Timer, TimerMode, VecModel,
+};
 use std::cell::RefCell;
 use std::env;
 use std::fs;
@@ -118,6 +121,8 @@ fn main() -> Result<()> {
     let config = load_app_config();
     ui.set_wallet_network(config.network.clone().into());
     ui.set_data_dir(config.data_dir.clone().into());
+    ui.set_psbt_path(default_psbt_path().display().to_string().into());
+    ui.set_pending_change_label(today_payroll_change_label().into());
     ui.set_fee_rate_sat_vb(config.fee_rate_sat_vb.to_string().into());
     ui.set_dust_limit_sat(config.dust_limit_sat.to_string().into());
     ui.set_rpc_url(config.rpc_url.clone().into());
@@ -382,7 +387,7 @@ fn save_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
             PsbtSavePath::NeedsDialog { directory } => {
                 let picked = rfd::FileDialog::new()
                     .set_directory(directory)
-                    .set_file_name("payroll.psbt")
+                    .set_file_name(today_payroll_psbt_file_name())
                     .save_file();
                 let Some(path) = picked else {
                     return Ok("PSBT save canceled".to_string());
@@ -1201,9 +1206,9 @@ fn utxo_table_row(utxo: &TreasuryUtxo) -> Vec<String> {
     vec![
         utxo.txid.clone(),
         utxo.vout.to_string(),
-        utxo.amount_sat.to_string(),
         utxo.chain.to_string(),
         utxo.derivation_index.to_string(),
+        utxo.amount_sat.to_string(),
         utxo.label.clone().unwrap_or_default(),
     ]
 }
@@ -1344,7 +1349,7 @@ fn change_prevout_from_psbt(
         chain: CHANGE_CHAIN,
         derivation_index,
         status: UtxoStatus::Available,
-        label: Some("payroll change".to_string()),
+        label: Some(today_payroll_change_label()),
     }))
 }
 
@@ -1381,7 +1386,7 @@ fn change_prevout_from_tx(
         chain: CHANGE_CHAIN,
         derivation_index,
         status: UtxoStatus::Available,
-        label: Some("payroll change".to_string()),
+        label: Some(today_payroll_change_label()),
     }))
 }
 
@@ -1435,6 +1440,26 @@ fn data_dir_path(data_dir: &str, value: &str) -> PathBuf {
         return path;
     }
     PathBuf::from(data_dir.trim()).join(path)
+}
+
+fn default_psbt_path() -> PathBuf {
+    Path::new("output").join(today_payroll_psbt_file_name())
+}
+
+fn today_payroll_psbt_file_name() -> String {
+    dated_payroll_psbt_file_name(Local::now().date_naive())
+}
+
+fn dated_payroll_psbt_file_name(date: NaiveDate) -> String {
+    format!("payroll-{}.psbt", date.format("%Y%m%d"))
+}
+
+fn today_payroll_change_label() -> String {
+    dated_payroll_change_label(Local::now().date_naive())
+}
+
+fn dated_payroll_change_label(date: NaiveDate) -> String {
+    format!("payroll {} change", date.format("%Y%m%d"))
 }
 
 fn default_path_for_network(

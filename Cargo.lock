@@ -4261,6 +4261,7 @@ dependencies = [
  "anyhow",
  "bitcoin",
  "bitcoincore-rpc",
+ "chrono",
  "copypasta",
  "hex",
  "hmac",

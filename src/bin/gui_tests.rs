@@ -24,6 +24,32 @@ fn full_psbt_path_saves_directly() {
 }
 
 #[test]
+fn dated_psbt_path_saves_directly() {
+    assert_eq!(
+        classify_psbt_save_path("/tmp/silent-pay", "output/payroll-20260714.psbt"),
+        PsbtSavePath::Direct(PathBuf::from(
+            "/tmp/silent-pay/output/payroll-20260714.psbt"
+        ))
+    );
+}
+
+#[test]
+fn dated_payroll_psbt_file_name_uses_yyyymmdd() {
+    assert_eq!(
+        dated_payroll_psbt_file_name(NaiveDate::from_ymd_opt(2026, 7, 14).unwrap()),
+        "payroll-20260714.psbt"
+    );
+}
+
+#[test]
+fn dated_payroll_change_label_uses_yyyymmdd() {
+    assert_eq!(
+        dated_payroll_change_label(NaiveDate::from_ymd_opt(2026, 7, 14).unwrap()),
+        "payroll 20260714 change"
+    );
+}
+
+#[test]
 fn directory_path_needs_dialog_in_that_directory() {
     assert_eq!(
         classify_psbt_save_path("/tmp/silent-pay", "output/"),
@@ -274,7 +300,7 @@ fn utxo_table_row_does_not_include_status() {
         label: Some("label".to_string()),
     });
 
-    assert_eq!(row, vec!["txid", "1", "2", "0", "3", "label"]);
+    assert_eq!(row, vec!["txid", "1", "0", "3", "2", "label"]);
 }
 
 #[test]
