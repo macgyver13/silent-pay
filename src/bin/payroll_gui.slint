@@ -138,6 +138,8 @@ export component PayrollGui inherits Window {
     in-out property <[[StandardListViewItem]]> available_utxo_rows;
     in-out property <[[StandardListViewItem]]> spent_utxo_rows;
     in-out property <int> selected_available_utxo_row: -1;
+    in-out property <bool> scan_in_progress: false;
+    in-out property <int> scan_progress: 0;
     in-out property <int> active_utxo_tab: 0;
     in-out property <bool> show_utxos: true;
     in-out property <bool> show_recipients: true;
@@ -181,6 +183,8 @@ export component PayrollGui inherits Window {
     callback select_utxo(int);
     callback add_utxo();
     callback remove_utxo();
+    callback scan_funding_utxos();
+    callback cancel_scan();
     callback save_utxo_state();
     callback save_recipients();
     callback select_recipient(int);
@@ -416,6 +420,9 @@ export component PayrollGui inherits Window {
                                 spacing: 14px;
                                 HorizontalLayout {
                                     Rectangle {}
+                                    if !root.scan_in_progress : ActionButton { width: 190px; text: "[o] Scan for funding"; tone: "primary"; clicked => { root.scan_funding_utxos(); } }
+                                    if root.scan_in_progress : ActionButton { width: 190px; text: "Cancel scan (\{root.scan_progress}%)"; tone: "danger"; clicked => { root.cancel_scan(); } }
+                                    Rectangle { width: 20px; }
                                     ActionButton { width: 190px; text: "[+] Previous Output"; tone: "good"; clicked => { root.add_utxo(); } }
                                     Rectangle { width: 20px; }
                                     ActionButton { width: 190px; text: "[-] Previous Output"; tone: "danger"; clicked => { root.remove_utxo(); } }

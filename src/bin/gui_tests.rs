@@ -303,6 +303,76 @@ fn app_config_parses_network() {
 }
 
 #[test]
+fn append_scanned_utxo_skips_duplicate_outpoint() {
+    let mut utxos = UtxoFile { utxos: Vec::new() };
+    let utxo = |txid: &str, vout: u32| TreasuryUtxo {
+        txid: txid.to_string(),
+        vout,
+        amount_sat: 1_000,
+        chain: RECEIVE_CHAIN,
+        derivation_index: 0,
+        status: UtxoStatus::Available,
+        label: None,
+    };
+    assert!(append_scanned_utxo(&mut utxos, utxo("aa", 0)));
+    // Same txid:vout is skipped, not an error.
+    assert!(!append_scanned_utxo(&mut utxos, utxo("aa", 0)));
+    // Different vout is a distinct output and is added.
+    assert!(append_scanned_utxo(&mut utxos, utxo("aa", 1)));
+    assert_eq!(utxos.utxos.len(), 2);
+}
+
+#[test]
+fn scan_floor_is_lowest_unspent_index_per_chain() {
+    let utxo = |chain: u32, index: u32, status: UtxoStatus| TreasuryUtxo {
+        txid: format!("{chain}-{index}"),
+        vout: 0,
+        amount_sat: 1_000,
+        chain,
+        derivation_index: index,
+        status,
+        label: None,
+    };
+    let utxos = UtxoFile {
+        utxos: vec![
+            // Receive chain: 0-2 spent, 3 and 5 available -> floor 3.
+            utxo(RECEIVE_CHAIN, 0, UtxoStatus::Spent),
+            utxo(RECEIVE_CHAIN, 1, UtxoStatus::Spent),
+            utxo(RECEIVE_CHAIN, 2, UtxoStatus::Spent),
+            utxo(RECEIVE_CHAIN, 5, UtxoStatus::Available),
+            utxo(RECEIVE_CHAIN, 3, UtxoStatus::Available),
+            // Change chain: available at 0 -> floor 0.
+            utxo(CHANGE_CHAIN, 0, UtxoStatus::Available),
+        ],
+    };
+    assert_eq!(scan_floor(&utxos, RECEIVE_CHAIN), 3);
+    assert_eq!(scan_floor(&utxos, CHANGE_CHAIN), 0);
+}
+
+#[test]
+fn scan_floor_defaults_to_zero_without_unspent_records() {
+    let spent = TreasuryUtxo {
+        txid: "aa".to_string(),
+        vout: 0,
+        amount_sat: 1_000,
+        chain: RECEIVE_CHAIN,
+        derivation_index: 4,
+        status: UtxoStatus::Spent,
+        label: None,
+    };
+    // Empty chain -> 0.
+    assert_eq!(
+        scan_floor(&UtxoFile { utxos: Vec::new() }, RECEIVE_CHAIN),
+        0
+    );
+    // All spent -> 0 (full scan; floor self-advances only while unspent exist).
+    assert_eq!(
+        scan_floor(&UtxoFile { utxos: vec![spent] }, RECEIVE_CHAIN),
+        0
+    );
+}
+
+#[test]
 fn app_config_defaults_when_empty() {
     let config: AppConfig = toml::from_str("").unwrap();
     assert_eq!(config.network, "testnet");
@@ -346,25 +416,6 @@ fn config_paths_use_local_config_without_home() {
         config_paths_for_home(None::<PathBuf>),
         vec![PathBuf::from("config.toml")]
     );
-}
-
-#[test]
-fn rpc_auth_uses_cookie_file_when_present() {
-    match rpc_auth(" /tmp/bitcoin/.cookie ", "user", "password") {
-        Auth::CookieFile(path) => assert_eq!(path, PathBuf::from("/tmp/bitcoin/.cookie")),
-        auth => panic!("expected cookie auth, got {auth:?}"),
-    }
-}
-
-#[test]
-fn rpc_auth_uses_user_pass_without_cookie_file() {
-    match rpc_auth("", "user", "password") {
-        Auth::UserPass(user, password) => {
-            assert_eq!(user, "user");
-            assert_eq!(password, "password");
-        }
-        auth => panic!("expected user/password auth, got {auth:?}"),
-    }
 }
 
 #[test]

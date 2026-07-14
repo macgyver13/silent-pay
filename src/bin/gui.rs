@@ -1,6 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::{Address, Amount, Network, Transaction, Txid};
-use bitcoincore_rpc::{Auth, Client, RpcApi};
 use copypasta::{ClipboardContext, ClipboardProvider};
 use psbt::Psbt as SilentPaymentPsbt;
 use serde::{Deserialize, Serialize};
@@ -11,11 +10,17 @@ use silent_pay::{
     RECEIVE_CHAIN,
 };
 use silentpayments::Network as SpNetwork;
-use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, Timer, TimerMode, VecModel};
+use std::cell::RefCell;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::str::FromStr;
+use std::sync::mpsc;
+use std::time::Duration;
+
+mod node;
 
 slint::slint! {
     export { PayrollGui } from "payroll_gui.slint";
@@ -52,6 +57,18 @@ fn main() -> Result<()> {
     {
         let weak = ui.as_weak();
         ui.on_remove_utxo(move || set_status(&weak, remove_utxo_from_ui(&weak)));
+    }
+    let scan_timer: Rc<RefCell<Option<Timer>>> = Rc::new(RefCell::new(None));
+    {
+        let weak = ui.as_weak();
+        let scan_timer = scan_timer.clone();
+        ui.on_scan_funding_utxos(move || {
+            set_status(&weak, start_funding_scan(&weak, &scan_timer))
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_cancel_scan(move || set_status(&weak, cancel_funding_scan(&weak)));
     }
     {
         let weak = ui.as_weak();
@@ -640,17 +657,162 @@ fn broadcast_final_tx_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> 
         bail!("final tx hex path is empty or contains no transaction hex");
     }
 
-    let auth = rpc_auth(
+    let auth = node::rpc_auth(
         ui.get_rpc_cookie_file().as_str(),
         ui.get_rpc_user().as_str(),
         ui.get_rpc_password().as_str(),
     );
-    let client =
-        Client::new(ui.get_rpc_url().as_str(), auth).context("failed to create RPC client")?;
-    let txid = client
-        .send_raw_transaction(tx_hex)
-        .context("Bitcoin Core sendrawtransaction failed")?;
+    let client = node::client(ui.get_rpc_url().as_str(), auth)?;
+    let txid = node::broadcast(&client, &tx_hex)?;
     Ok(format!("Broadcast transaction {txid}"))
+}
+
+fn start_funding_scan(
+    weak: &slint::Weak<PayrollGui>,
+    scan_timer: &Rc<RefCell<Option<Timer>>>,
+) -> Result<String> {
+    let ui = weak.upgrade().context("GUI closed")?;
+    if ui.get_scan_in_progress() {
+        bail!("a funding scan is already running");
+    }
+
+    let wallet = wallet_from_ui(&ui)?.normalized()?;
+    let max_index = node::scan_max_index(&wallet);
+
+    let utxos_path = default_path_for_network(
+        ui.get_wallet_network().as_str(),
+        ui.get_data_dir().as_str(),
+        ui.get_utxos_path().as_str(),
+        "utxos.toml",
+    );
+    ui.set_utxos_path(utxos_path.display().to_string().into());
+
+    // Skip the fully-spent low prefix on each chain: start at the lowest index
+    // that still has an unspent recorded UTXO.
+    let utxos = load_utxos_or_default(&utxos_path)?;
+    let receive_start = scan_floor(&utxos, RECEIVE_CHAIN).min(max_index);
+    let change_start = scan_floor(&utxos, CHANGE_CHAIN).min(max_index);
+    let (requests, script_index) = node::build_scan_plan(
+        &wallet,
+        &[
+            (RECEIVE_CHAIN, receive_start, max_index),
+            (CHANGE_CHAIN, change_start, max_index),
+        ],
+    )?;
+
+    let rpc_url = ui.get_rpc_url().to_string();
+    let auth = node::rpc_auth(
+        ui.get_rpc_cookie_file().as_str(),
+        ui.get_rpc_user().as_str(),
+        ui.get_rpc_password().as_str(),
+    );
+    // A second client on its own connection polls scan progress while the scan
+    // thread holds the blocking `scantxoutset start` call.
+    let status_client = node::client(&rpc_url, auth.clone())?;
+
+    let (tx, rx) = mpsc::channel::<Result<node::ScanFindings>>();
+    std::thread::spawn(move || {
+        let outcome = node::client_with_timeout(&rpc_url, auth, node::SCAN_RPC_TIMEOUT)
+            .context("failed to create scan RPC client")
+            .and_then(|client| node::run_funding_scan(&client, &requests, &script_index));
+        let _ = tx.send(outcome);
+    });
+
+    ui.set_scan_in_progress(true);
+    ui.set_scan_progress(0);
+
+    let timer = Timer::default();
+    let weak = weak.clone();
+    let scan_timer_handle = scan_timer.clone();
+    timer.start(TimerMode::Repeated, Duration::from_millis(750), move || {
+        if let Some(ui) = weak.upgrade() {
+            if let Some(progress) = node::scan_progress(&status_client) {
+                ui.set_scan_progress(progress as i32);
+            }
+        }
+        match rx.try_recv() {
+            Ok(outcome) => {
+                if let Some(timer) = scan_timer_handle.borrow().as_ref() {
+                    timer.stop();
+                }
+                finish_funding_scan(&weak, &utxos_path, outcome);
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                if let Some(timer) = scan_timer_handle.borrow().as_ref() {
+                    timer.stop();
+                }
+                finish_funding_scan(&weak, &utxos_path, Err(anyhow!("scan thread ended unexpectedly")));
+            }
+        }
+    });
+    *scan_timer.borrow_mut() = Some(timer);
+
+    Ok(format!(
+        "Scanning receive {receive_start}..{max_index}, change {change_start}..{max_index}…"
+    ))
+}
+
+fn finish_funding_scan(
+    weak: &slint::Weak<PayrollGui>,
+    utxos_path: &Path,
+    outcome: Result<node::ScanFindings>,
+) {
+    let result = (|| -> Result<String> {
+        let ui = weak.upgrade().context("GUI closed")?;
+        let findings = outcome?;
+        if findings.aborted {
+            return Ok("Funding scan cancelled".to_string());
+        }
+        let mut utxos = load_utxos_or_default(utxos_path)?;
+        let found = findings.utxos.len();
+        let mut added = 0usize;
+        for scanned in findings.utxos {
+            if append_scanned_utxo(&mut utxos, scanned_to_utxo(scanned)) {
+                added += 1;
+            }
+        }
+        save_utxos(utxos_path, &utxos)?;
+        refresh_utxo_rows(&ui, &utxos);
+        Ok(format!(
+            "Funding scan complete: found {found}, added {added} new, skipped {} already recorded",
+            found - added
+        ))
+    })();
+
+    if let Some(ui) = weak.upgrade() {
+        ui.set_scan_in_progress(false);
+        ui.set_scan_progress(0);
+    }
+    set_status(weak, result);
+}
+
+fn cancel_funding_scan(weak: &slint::Weak<PayrollGui>) -> Result<String> {
+    let ui = weak.upgrade().context("GUI closed")?;
+    let auth = node::rpc_auth(
+        ui.get_rpc_cookie_file().as_str(),
+        ui.get_rpc_user().as_str(),
+        ui.get_rpc_password().as_str(),
+    );
+    let client = node::client(ui.get_rpc_url().as_str(), auth)?;
+    if node::abort_scan(&client)? {
+        Ok("Cancelling funding scan…".to_string())
+    } else {
+        Ok("No funding scan in progress".to_string())
+    }
+}
+
+/// Map a scanned funding output to a persisted UTXO record.
+fn scanned_to_utxo(scanned: node::ScanUtxo) -> TreasuryUtxo {
+    TreasuryUtxo {
+        txid: scanned.txid,
+        vout: scanned.vout,
+        amount_sat: scanned.amount_sat,
+        chain: scanned.chain,
+        derivation_index: scanned.derivation_index,
+        status: UtxoStatus::Available,
+        label: None,
+    }
 }
 
 const APP_CONFIG_DIR: &str = ".silent-pay";
@@ -735,19 +897,6 @@ fn save_app_config_from_ui(ui: &PayrollGui) -> Result<()> {
     }
     fs::write(&path, toml::to_string_pretty(&config)?)
         .with_context(|| format!("failed to write config {}", path.display()))
-}
-
-fn rpc_auth(cookie_file: &str, user: &str, password: &str) -> Auth {
-    let cookie_file = cookie_file.trim();
-    if !cookie_file.is_empty() {
-        return Auth::CookieFile(PathBuf::from(cookie_file));
-    }
-
-    if user.is_empty() && password.is_empty() {
-        Auth::None
-    } else {
-        Auth::UserPass(user.to_string(), password.to_string())
-    }
 }
 
 fn default_app_config() -> AppConfig {
@@ -1105,6 +1254,34 @@ fn append_fresh_utxo(utxos: &mut UtxoFile, utxo: TreasuryUtxo) -> Result<()> {
     }
     utxos.utxos.push(utxo);
     Ok(())
+}
+
+/// Lowest index still worth scanning on `chain`: the lowest index with an
+/// unspent recorded UTXO (everything below is spent), or 0 when the chain has no
+/// unspent records. Skips the spent prefix; will not re-detect funds sent to
+/// reused old (spent) addresses below the floor.
+fn scan_floor(utxos: &UtxoFile, chain: u32) -> u32 {
+    utxos
+        .utxos
+        .iter()
+        .filter(|utxo| utxo.chain == chain && utxo.status == UtxoStatus::Available)
+        .map(|utxo| utxo.derivation_index)
+        .min()
+        .unwrap_or(0)
+}
+
+/// Append a scanned UTXO, skipping (rather than erroring on) any output already
+/// recorded at the same `txid:vout`. Returns whether the UTXO was inserted.
+fn append_scanned_utxo(utxos: &mut UtxoFile, utxo: TreasuryUtxo) -> bool {
+    if utxos
+        .utxos
+        .iter()
+        .any(|existing| existing.txid == utxo.txid && existing.vout == utxo.vout)
+    {
+        return false;
+    }
+    utxos.utxos.push(utxo);
+    true
 }
 
 fn mark_utxo_spent(utxos: &mut UtxoFile, txid: &str, vout: u32) -> Result<()> {

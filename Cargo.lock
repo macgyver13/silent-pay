@@ -4269,6 +4269,7 @@ dependencies = [
  "rfd",
  "secp256k1 0.29.1",
  "serde",
+ "serde_json",
  "sha2",
  "silentpayments",
  "slint",
