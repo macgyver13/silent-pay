@@ -149,6 +149,61 @@ fn change_address_changes_with_change_derivation_index() {
 }
 
 #[test]
+fn change_prevout_from_tx_allows_no_change_output() {
+    let wallet = parse_wallet(TEST_WALLET_TOML).unwrap();
+    let tx = test_tx(vec![bitcoin::TxOut {
+        value: Amount::from_sat(2_000),
+        script_pubkey: bitcoin::ScriptBuf::new(),
+    }]);
+
+    let change = change_prevout_from_tx(&tx, "change-txid", &wallet, 0).unwrap();
+
+    assert!(change.is_none());
+}
+
+#[test]
+fn change_prevout_from_tx_detects_single_change_output() {
+    let wallet = parse_wallet(TEST_WALLET_TOML).unwrap();
+    let change_script = derive_treasury_script_pubkey(&wallet, CHANGE_CHAIN, 0).unwrap();
+    let tx = test_tx(vec![bitcoin::TxOut {
+        value: Amount::from_sat(2_000),
+        script_pubkey: change_script,
+    }]);
+
+    let change = change_prevout_from_tx(&tx, "change-txid", &wallet, 0)
+        .unwrap()
+        .expect("change");
+
+    assert_eq!(change.txid, "change-txid");
+    assert_eq!(change.vout, 0);
+    assert_eq!(change.amount_sat, 2_000);
+    assert_eq!(change.derivation_index, 0);
+}
+
+#[test]
+fn change_prevout_from_tx_rejects_multiple_change_outputs() {
+    let wallet = parse_wallet(TEST_WALLET_TOML).unwrap();
+    let change_script = derive_treasury_script_pubkey(&wallet, CHANGE_CHAIN, 0).unwrap();
+    let tx = test_tx(vec![
+        bitcoin::TxOut {
+            value: Amount::from_sat(2_000),
+            script_pubkey: change_script.clone(),
+        },
+        bitcoin::TxOut {
+            value: Amount::from_sat(3_000),
+            script_pubkey: change_script,
+        },
+    ]);
+
+    let err = change_prevout_from_tx(&tx, "change-txid", &wallet, 0).unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "expected at most one output matching change derivation index 0, found 2"
+    );
+}
+
+#[test]
 fn available_utxo_index_maps_filtered_rows_to_source_rows() {
     let utxos = UtxoFile {
         utxos: vec![
@@ -258,6 +313,20 @@ fn app_config_defaults_when_empty() {
     assert_eq!(config.rpc_cookie_file, "");
     assert_eq!(config.rpc_user, "");
     assert_eq!(config.rpc_password, "");
+}
+
+fn test_tx(output: Vec<bitcoin::TxOut>) -> Transaction {
+    Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::null(),
+            script_sig: bitcoin::ScriptBuf::new(),
+            sequence: bitcoin::Sequence::MAX,
+            witness: bitcoin::Witness::new(),
+        }],
+        output,
+    }
 }
 
 #[test]

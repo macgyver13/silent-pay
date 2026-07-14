@@ -57,7 +57,9 @@ pub fn parse_wallet(contents: &str) -> Result<TreasuryWalletConfig> {
         last_derivation_index: raw.last_derivation_index,
         // Change lives on its own BIP-32 internal chain (/1/*), so its index is
         // independent of the receive (/0/*) index and starts at 0.
-        change_derivation_index: raw.change_derivation_index.unwrap_or(0),
+        change_derivation_index: raw
+            .change_derivation_index
+            .unwrap_or_else(default_change_derivation_index),
         signers: raw.signers,
     };
     wallet.normalized()

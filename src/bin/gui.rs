@@ -406,18 +406,34 @@ fn save_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
         .as_str()
         .parse()
         .context("invalid miner fee_sat")?;
+    let dust_limit_sat = ui
+        .get_dust_limit_sat()
+        .as_str()
+        .parse()
+        .context("invalid dust limit sat")?;
     let mut config = BuildInitialPayrollConfig::new(wallet, &recipients_path, prevout, &psbt_path);
     config.fee = Amount::from_sat(fee_sat);
+    config.dust_limit = Amount::from_sat(dust_limit_sat);
     let result = build_initial_payroll_psbt(config)?;
 
-    Ok(format!(
-        "Saved {} with {} recipients, {} sat outputs, {} sat fee, {} sat change",
-        result.psbt_path.display(),
-        result.recipient_count,
-        result.total_output_sat,
-        fee_sat,
-        result.change_sat
-    ))
+    match result.change_sat {
+        Some(change_sat) => Ok(format!(
+            "Saved {} with {} recipients, {} sat outputs, {} sat requested fee, {} sat effective fee, {} sat change",
+            result.psbt_path.display(),
+            result.recipient_count,
+            result.total_output_sat,
+            fee_sat,
+            result.effective_fee_sat,
+            change_sat
+        )),
+        None => Ok(format!(
+            "Saved {} with {} recipients, {} sat outputs, {} sat effective fee; dust change was added to fees",
+            result.psbt_path.display(),
+            result.recipient_count,
+            result.total_output_sat,
+            result.effective_fee_sat
+        )),
+    }
 }
 
 fn pick_finalize_psbt_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
@@ -451,32 +467,45 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
         &wallet_from_ui(&ui)?,
         change_derivation_index,
     )?;
-    let next_change_derivation_index = next_change_derivation_index(change.derivation_index);
 
     ui.set_final_txid(result.txid.clone().into());
     ui.set_pending_spent_txid(ui.get_txid());
     ui.set_pending_spent_vout(ui.get_vout());
-    ui.set_pending_change_txid(result.txid.clone().into());
-    ui.set_pending_change_vout(change.vout.to_string().into());
-    ui.set_pending_change_amount_sat(change.amount_sat.to_string().into());
-    ui.set_pending_change_derivation_index(change.derivation_index.to_string().into());
-    ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
-    // Change advances its own /1/* counter; the receive (/0/*) index is untouched.
-    ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
+    let change_summary = match change {
+        Some(change) => {
+            let next_change_derivation_index =
+                next_change_derivation_index(change.derivation_index);
+            ui.set_pending_change_txid(result.txid.clone().into());
+            ui.set_pending_change_vout(change.vout.to_string().into());
+            ui.set_pending_change_amount_sat(change.amount_sat.to_string().into());
+            ui.set_pending_change_derivation_index(change.derivation_index.to_string().into());
+            ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
+            // Change advances its own /1/* counter; the receive (/0/*) index is untouched.
+            ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
+            format!(
+                "new change: {}:{}\nchange amount: {}\nchange derivation index: {}\nnext change derivation index: {}",
+                result.txid,
+                change.vout,
+                change.amount_sat,
+                change.derivation_index,
+                next_change_derivation_index
+            )
+        }
+        None => {
+            clear_pending_change(&ui);
+            "new change: none\nchange derivation index unchanged".to_string()
+        }
+    };
     update_receive_address(&ui)?;
     ui.set_final_tx_hex_path(result.final_tx_hex_path.display().to_string().into());
     ui.set_finalize_summary(
         format!(
-            "txid: {}\nverified SP outputs: {}\nspent input: {}:{}\nnew change: {}:{}\nchange amount: {}\nchange derivation index: {}\nnext change derivation index: {}\nfinal PSBT: {}\nfinal tx hex: {}",
+            "txid: {}\nverified SP outputs: {}\nspent input: {}:{}\n{}\nfinal PSBT: {}\nfinal tx hex: {}",
             result.txid,
             result.verified_outputs,
             ui.get_pending_spent_txid(),
             ui.get_pending_spent_vout(),
-            result.txid,
-            change.vout,
-            change.amount_sat,
-            change.derivation_index,
-            next_change_derivation_index,
+            change_summary,
             result.final_psbt_path.display(),
             result.final_tx_hex_path.display()
         )
@@ -510,27 +539,29 @@ fn save_utxo_state_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     }
     mark_utxo_spent(&mut utxos, &spent_txid, spent_vout)?;
 
-    let change = TreasuryUtxo {
-        txid: ui.get_pending_change_txid().trim().to_string(),
-        vout: ui
-            .get_pending_change_vout()
-            .as_str()
-            .parse()
-            .context("invalid pending change vout")?,
-        amount_sat: ui
-            .get_pending_change_amount_sat()
-            .as_str()
-            .parse()
-            .context("invalid pending change amount_sat")?,
-        chain: CHANGE_CHAIN,
-        derivation_index: parse_u32(
-            ui.get_pending_change_derivation_index().as_str(),
-            "pending change derivation index",
-        )?,
-        status: UtxoStatus::Available,
-        label: blank_to_none(ui.get_pending_change_label().as_str()),
-    };
-    append_fresh_utxo(&mut utxos, change)?;
+    if !ui.get_pending_change_txid().trim().is_empty() {
+        let change = TreasuryUtxo {
+            txid: ui.get_pending_change_txid().trim().to_string(),
+            vout: ui
+                .get_pending_change_vout()
+                .as_str()
+                .parse()
+                .context("invalid pending change vout")?,
+            amount_sat: ui
+                .get_pending_change_amount_sat()
+                .as_str()
+                .parse()
+                .context("invalid pending change amount_sat")?,
+            chain: CHANGE_CHAIN,
+            derivation_index: parse_u32(
+                ui.get_pending_change_derivation_index().as_str(),
+                "pending change derivation index",
+            )?,
+            status: UtxoStatus::Available,
+            label: blank_to_none(ui.get_pending_change_label().as_str()),
+        };
+        append_fresh_utxo(&mut utxos, change)?;
+    }
     save_utxos(&path, &utxos)?;
     refresh_utxo_rows(&ui, &utxos);
 
@@ -555,31 +586,44 @@ fn load_final_tx_hex_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     )?;
     let change =
         change_prevout_from_tx(&tx, &txid, &wallet_from_ui(&ui)?, change_derivation_index)?;
-    let next_change_derivation_index = next_change_derivation_index(change.derivation_index);
 
     ui.set_final_tx_hex_path(path.display().to_string().into());
     ui.set_final_txid(txid.clone().into());
     ui.set_pending_spent_txid(spent.txid.to_string().into());
     ui.set_pending_spent_vout(spent.vout.to_string().into());
-    ui.set_pending_change_txid(txid.clone().into());
-    ui.set_pending_change_vout(change.vout.to_string().into());
-    ui.set_pending_change_amount_sat(change.amount_sat.to_string().into());
-    ui.set_pending_change_derivation_index(change.derivation_index.to_string().into());
-    ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
-    // Change advances its own /1/* counter; the receive (/0/*) index is untouched.
-    ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
+    let change_summary = match change {
+        Some(change) => {
+            let next_change_derivation_index =
+                next_change_derivation_index(change.derivation_index);
+            ui.set_pending_change_txid(txid.clone().into());
+            ui.set_pending_change_vout(change.vout.to_string().into());
+            ui.set_pending_change_amount_sat(change.amount_sat.to_string().into());
+            ui.set_pending_change_derivation_index(change.derivation_index.to_string().into());
+            ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
+            // Change advances its own /1/* counter; the receive (/0/*) index is untouched.
+            ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
+            format!(
+                "new change: {}:{}\nchange amount: {}\nchange derivation index: {}\nnext change derivation index: {}",
+                txid,
+                change.vout,
+                change.amount_sat,
+                change.derivation_index,
+                next_change_derivation_index
+            )
+        }
+        None => {
+            clear_pending_change(&ui);
+            "new change: none\nchange derivation index unchanged".to_string()
+        }
+    };
     update_receive_address(&ui)?;
     ui.set_finalize_summary(
         format!(
-            "loaded final tx hex: {}\ntxid: {txid}\nspent input: {}:{}\nnew change: {}:{}\nchange amount: {}\nchange derivation index: {}\nnext change derivation index: {}",
+            "loaded final tx hex: {}\ntxid: {txid}\nspent input: {}:{}\n{}",
             path.display(),
             spent.txid,
             spent.vout,
-            txid,
-            change.vout,
-            change.amount_sat,
-            change.derivation_index,
-            next_change_derivation_index
+            change_summary
         )
         .into(),
     );
@@ -1078,12 +1122,20 @@ fn mark_utxo_spent(utxos: &mut UtxoFile, txid: &str, vout: u32) -> Result<()> {
     Ok(())
 }
 
+fn clear_pending_change(ui: &PayrollGui) {
+    ui.set_pending_change_txid("".into());
+    ui.set_pending_change_vout("".into());
+    ui.set_pending_change_amount_sat("".into());
+    ui.set_pending_change_derivation_index("".into());
+    ui.set_pending_change_label("".into());
+}
+
 fn change_prevout_from_psbt(
     path: impl AsRef<Path>,
     txid: &str,
     wallet: &TreasuryWalletConfig,
     derivation_index: u32,
-) -> Result<TreasuryUtxo> {
+) -> Result<Option<TreasuryUtxo>> {
     let path = path.as_ref();
     let bytes =
         fs::read(path).with_context(|| format!("failed to read PSBT {}", path.display()))?;
@@ -1096,14 +1148,17 @@ fn change_prevout_from_psbt(
         .filter(|(_, output)| output.script_pubkey == change_script)
         .map(|(vout, output)| (vout, output.amount.to_sat()))
         .collect::<Vec<_>>();
+    if change.is_empty() {
+        return Ok(None);
+    }
     if change.len() != 1 {
         bail!(
-            "expected exactly one output matching change derivation index {derivation_index}, found {}",
+            "expected at most one output matching change derivation index {derivation_index}, found {}",
             change.len()
         );
     }
     let (vout, amount_sat) = change[0];
-    Ok(TreasuryUtxo {
+    Ok(Some(TreasuryUtxo {
         txid: txid.to_string(),
         vout: vout
             .try_into()
@@ -1113,7 +1168,7 @@ fn change_prevout_from_psbt(
         derivation_index,
         status: UtxoStatus::Available,
         label: Some("payroll change".to_string()),
-    })
+    }))
 }
 
 fn change_prevout_from_tx(
@@ -1121,7 +1176,7 @@ fn change_prevout_from_tx(
     txid: &str,
     wallet: &TreasuryWalletConfig,
     derivation_index: u32,
-) -> Result<TreasuryUtxo> {
+) -> Result<Option<TreasuryUtxo>> {
     let change_script = derive_treasury_script_pubkey(wallet, CHANGE_CHAIN, derivation_index)?;
     let change = tx
         .output
@@ -1130,14 +1185,17 @@ fn change_prevout_from_tx(
         .filter(|(_, output)| output.script_pubkey == change_script)
         .map(|(vout, output)| (vout, output.value.to_sat()))
         .collect::<Vec<_>>();
+    if change.is_empty() {
+        return Ok(None);
+    }
     if change.len() != 1 {
         bail!(
-            "expected exactly one output matching change derivation index {derivation_index}, found {}",
+            "expected at most one output matching change derivation index {derivation_index}, found {}",
             change.len()
         );
     }
     let (vout, amount_sat) = change[0];
-    Ok(TreasuryUtxo {
+    Ok(Some(TreasuryUtxo {
         txid: txid.to_string(),
         vout: vout
             .try_into()
@@ -1147,7 +1205,7 @@ fn change_prevout_from_tx(
         derivation_index,
         status: UtxoStatus::Available,
         label: Some("payroll change".to_string()),
-    })
+    }))
 }
 
 fn single_spent_prevout(tx: &Transaction) -> Result<bitcoin::OutPoint> {

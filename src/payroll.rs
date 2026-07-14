@@ -37,6 +37,7 @@ pub struct BuildInitialPayrollConfig {
     pub prevout: TreasuryPrevout,
     pub psbt_path: PathBuf,
     pub fee: Amount,
+    pub dust_limit: Amount,
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +45,8 @@ pub struct BuildInitialPayrollResult {
     pub psbt_path: PathBuf,
     pub recipient_count: usize,
     pub total_output_sat: u64,
-    pub change_sat: u64,
+    pub change_sat: Option<u64>,
+    pub effective_fee_sat: u64,
     pub descriptor: String,
 }
 
@@ -61,6 +63,7 @@ impl BuildInitialPayrollConfig {
             prevout,
             psbt_path: psbt_path.into(),
             fee: Amount::from_sat(1_000),
+            dust_limit: Amount::from_sat(546),
         }
     }
 }
@@ -72,6 +75,15 @@ pub fn build_initial_payroll_psbt(
     let descriptor = wallet.descriptor_string()?;
     let recipients = load_recipients(&config.recipients_path)?;
     validate_recipient_networks(wallet.network_value()?, &recipients)?;
+    for (idx, recipient) in recipients.iter().enumerate() {
+        if recipient.amount < config.dust_limit {
+            bail!(
+                "recipient[{idx}] amount {} sat is below dust limit {} sat",
+                recipient.amount.to_sat(),
+                config.dust_limit.to_sat()
+            );
+        }
+    }
 
     let total_output = recipients
         .iter()
@@ -82,14 +94,30 @@ pub fn build_initial_payroll_psbt(
     let spend_amount = total_output
         .checked_add(config.fee)
         .ok_or_else(|| anyhow::anyhow!("recipient amount plus fee overflow"))?;
-    if config.prevout.amount <= spend_amount {
-        bail!("prevout amount must be greater than total recipients plus fee");
+    if config.prevout.amount < spend_amount {
+        bail!("prevout amount must cover total recipients plus fee");
     }
     let change = config
         .prevout
         .amount
         .checked_sub(spend_amount)
         .ok_or_else(|| anyhow::anyhow!("change amount underflow"))?;
+    let change = if change == Amount::ZERO {
+        None
+    } else if config.dust_limit == Amount::ZERO || change >= config.dust_limit {
+        Some(change)
+    } else {
+        None
+    };
+    let effective_fee = config
+        .prevout
+        .amount
+        .checked_sub(total_output)
+        .and_then(|remaining| match change {
+            Some(change) => remaining.checked_sub(change),
+            None => Some(remaining),
+        })
+        .ok_or_else(|| anyhow::anyhow!("effective fee amount underflow"))?;
 
     let secp = Secp256k1::new();
     let input_keys = derive_wallet_public_keys(
@@ -122,7 +150,8 @@ pub fn build_initial_payroll_psbt(
         psbt_path: config.psbt_path,
         recipient_count: recipients.len(),
         total_output_sat: total_output.to_sat(),
-        change_sat: change.to_sat(),
+        change_sat: change.map(|amount| amount.to_sat()),
+        effective_fee_sat: effective_fee.to_sat(),
         descriptor,
     })
 }
@@ -198,7 +227,7 @@ fn construct_initial_psbt(
     change_keys: &WalletPublicKeys,
     prevout: &TreasuryPrevout,
     recipients: &[(silentpayments::SilentPaymentAddress, Amount)],
-    change: Amount,
+    change: Option<Amount>,
 ) -> Result<Psbt> {
     let mut outputs: Vec<Output> = recipients
         .iter()
@@ -211,10 +240,12 @@ fn construct_initial_psbt(
             output
         })
         .collect();
-    outputs.push(Output::new(TxOut {
-        value: change,
-        script_pubkey: change_keys.p2tr_script.clone(),
-    }));
+    if let Some(change) = change {
+        outputs.push(Output::new(TxOut {
+            value: change,
+            script_pubkey: change_keys.p2tr_script.clone(),
+        }));
+    }
 
     let mut psbt = build_psbt(vec![OutPoint::new(prevout.txid, prevout.vout)], outputs)?;
     psbt.inputs[0].witness_utxo = Some(TxOut {
@@ -222,10 +253,8 @@ fn construct_initial_psbt(
         script_pubkey: input_keys.p2tr_script.clone(),
     });
     psbt.inputs[0].tap_internal_key = Some(input_keys.plain_child_xonly);
-    psbt.inputs[0].set_musig2_participant_pubkeys(
-        &input_keys.untweaked_agg_pk,
-        &input_keys.participant_pks,
-    );
+    psbt.inputs[0]
+        .set_musig2_participant_pubkeys(&input_keys.untweaked_agg_pk, &input_keys.participant_pks);
     // The aggregate MuSig2 key's [chain, index] child-derivation path lives in a
     // TAP_BIP32_DERIVATION entry (BIP-373), not in the BIP-376 SP-spend field
     // (which is only for spending inputs that are themselves silent-payment
@@ -330,35 +359,17 @@ mod tests {
     const XPUB1: &str = "tpubDF2rnouQaaYrY6CUWTapYkeFEs3h3qrzL4M52ZGoPeU9dkarJMtrw6VF1zJRGuGuAFxYS3kXtavfAwQPTQkU5dyNYpbgxcpftrR8H3U85Ez";
     const XPUB2: &str = "tpubDFcrvj5n7gyazzxdg9k6uvzQsoQWow1xbksr7EvKPRBgUbwCdqu2qxyTJjYFNJ7MQLfdXSJV4n8xPZGtrvwQtEbktinC4EP3k8JN2hcBtz4";
 
-    #[test]
-    fn builds_initial_psbt_without_private_contributions() {
-        let dir =
-            std::env::temp_dir().join(format!("silent-pay-real-payroll-{}", std::process::id()));
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "silent-pay-real-payroll-{}-{name}",
+            std::process::id()
+        ));
         fs::create_dir_all(&dir).expect("temp dir");
-        let recipients_path = dir.join("recipients.toml");
-        let psbt_path = dir.join("payroll.psbt");
+        dir
+    }
 
-        let secp = Secp256k1::new();
-        let scan_sk = SecretKey::from_slice(&[3u8; 32]).expect("scan key");
-        let spend_sk = SecretKey::from_slice(&[4u8; 32]).expect("spend key");
-        let address = SilentPaymentAddress::new(
-            PublicKey::from_secret_key(&secp, &scan_sk),
-            PublicKey::from_secret_key(&secp, &spend_sk),
-            SpNetwork::Testnet,
-            SpVersion::ZERO,
-        );
-        crate::recipients::save_recipients(
-            &recipients_path,
-            &[RecipientEntry {
-                label: Some("alice".to_string()),
-                amount_sat: 2_000,
-                seed_hex: None,
-                address: Some(address.to_string()),
-            }],
-        )
-        .expect("save recipients");
-
-        let wallet = TreasuryWalletConfig {
+    fn test_wallet() -> TreasuryWalletConfig {
+        TreasuryWalletConfig {
             network: "testnet".to_string(),
             descriptor: None,
             last_derivation_index: 0,
@@ -375,17 +386,83 @@ mod tests {
                     xpub: XPUB2.to_string(),
                 },
             ],
-        };
-        let prevout = TreasuryPrevout {
+        }
+    }
+
+    fn test_prevout(amount_sat: u64) -> TreasuryPrevout {
+        TreasuryPrevout {
             txid: Txid::from_str(
                 "1111111111111111111111111111111111111111111111111111111111111111",
             )
             .expect("txid"),
             vout: 7,
-            amount: Amount::from_sat(10_000),
+            amount: Amount::from_sat(amount_sat),
             chain: RECEIVE_CHAIN,
             derivation_index: 0,
-        };
+        }
+    }
+
+    fn save_test_recipients(path: &Path, amount_sat: u64) {
+        let secp = Secp256k1::new();
+        let scan_sk = SecretKey::from_slice(&[3u8; 32]).expect("scan key");
+        let spend_sk = SecretKey::from_slice(&[4u8; 32]).expect("spend key");
+        let address = SilentPaymentAddress::new(
+            PublicKey::from_secret_key(&secp, &scan_sk),
+            PublicKey::from_secret_key(&secp, &spend_sk),
+            SpNetwork::Testnet,
+            SpVersion::ZERO,
+        );
+        crate::recipients::save_recipients(
+            path,
+            &[RecipientEntry {
+                label: Some("alice".to_string()),
+                amount_sat,
+                seed_hex: None,
+                address: Some(address.to_string()),
+            }],
+        )
+        .expect("save recipients");
+    }
+
+    fn build_test_psbt(
+        name: &str,
+        recipient_sat: u64,
+        prevout_sat: u64,
+        fee_sat: u64,
+        dust_limit_sat: u64,
+    ) -> Result<BuildInitialPayrollResult> {
+        let dir = test_dir(name);
+        let recipients_path = dir.join("recipients.toml");
+        let psbt_path = dir.join("payroll.psbt");
+        save_test_recipients(&recipients_path, recipient_sat);
+
+        let mut config = BuildInitialPayrollConfig::new(
+            test_wallet(),
+            &recipients_path,
+            test_prevout(prevout_sat),
+            &psbt_path,
+        );
+        config.fee = Amount::from_sat(fee_sat);
+        config.dust_limit = Amount::from_sat(dust_limit_sat);
+        build_initial_payroll_psbt(config)
+    }
+
+    fn change_output_count(psbt: &Psbt) -> usize {
+        psbt.outputs
+            .iter()
+            .filter(|output| output.sp_v0_info.is_none())
+            .count()
+    }
+
+    #[test]
+    fn builds_initial_psbt_without_private_contributions() {
+        let dir = test_dir("builds_initial_psbt_without_private_contributions");
+        let recipients_path = dir.join("recipients.toml");
+        let psbt_path = dir.join("payroll.psbt");
+
+        save_test_recipients(&recipients_path, 2_000);
+        let wallet = test_wallet();
+        let prevout = test_prevout(10_000);
 
         let result = build_initial_payroll_psbt(BuildInitialPayrollConfig::new(
             wallet.clone(),
@@ -395,6 +472,8 @@ mod tests {
         ))
         .expect("build psbt");
         let psbt = inspect_initial_payroll_psbt(&result.psbt_path).expect("inspect");
+        assert_eq!(result.change_sat, Some(7_000));
+        assert_eq!(result.effective_fee_sat, 1_000);
 
         assert_eq!(
             psbt.inputs[0].previous_txid.to_string(),
@@ -486,5 +565,98 @@ mod tests {
                 DerivationPath::from_str("m/48h/1h/0h/3h").expect("path")
             );
         }
+    }
+
+    #[test]
+    fn rejects_recipient_below_dust_limit() {
+        let err = build_test_psbt(
+            "rejects_recipient_below_dust_limit",
+            545,
+            10_000,
+            1_000,
+            546,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "recipient[0] amount 545 sat is below dust limit 546 sat"
+        );
+    }
+
+    #[test]
+    fn accepts_recipient_equal_to_dust_limit() {
+        let result = build_test_psbt(
+            "accepts_recipient_equal_to_dust_limit",
+            546,
+            10_000,
+            1_000,
+            546,
+        )
+        .expect("build psbt");
+
+        assert_eq!(result.total_output_sat, 546);
+    }
+
+    #[test]
+    fn omits_change_below_dust_limit_and_adds_it_to_fee() {
+        let result = build_test_psbt(
+            "omits_change_below_dust_limit_and_adds_it_to_fee",
+            2_000,
+            3_545,
+            1_000,
+            546,
+        )
+        .expect("build psbt");
+        let psbt = inspect_initial_payroll_psbt(&result.psbt_path).expect("inspect");
+
+        assert_eq!(result.change_sat, None);
+        assert_eq!(result.effective_fee_sat, 1_545);
+        assert_eq!(change_output_count(&psbt), 0);
+    }
+
+    #[test]
+    fn omits_zero_change_without_increasing_fee() {
+        let result = build_test_psbt(
+            "omits_zero_change_without_increasing_fee",
+            2_000,
+            3_000,
+            1_000,
+            546,
+        )
+        .expect("build psbt");
+        let psbt = inspect_initial_payroll_psbt(&result.psbt_path).expect("inspect");
+
+        assert_eq!(result.change_sat, None);
+        assert_eq!(result.effective_fee_sat, 1_000);
+        assert_eq!(change_output_count(&psbt), 0);
+    }
+
+    #[test]
+    fn creates_change_equal_to_dust_limit() {
+        let result = build_test_psbt(
+            "creates_change_equal_to_dust_limit",
+            2_000,
+            3_546,
+            1_000,
+            546,
+        )
+        .expect("build psbt");
+        let psbt = inspect_initial_payroll_psbt(&result.psbt_path).expect("inspect");
+
+        assert_eq!(result.change_sat, Some(546));
+        assert_eq!(result.effective_fee_sat, 1_000);
+        assert_eq!(change_output_count(&psbt), 1);
+    }
+
+    #[test]
+    fn creates_change_above_dust_limit() {
+        let result = build_test_psbt("creates_change_above_dust_limit", 2_000, 10_000, 1_000, 546)
+            .expect("build psbt");
+        let psbt = inspect_initial_payroll_psbt(&result.psbt_path).expect("inspect");
+
+        assert_eq!(result.change_sat, Some(7_000));
+        assert_eq!(result.effective_fee_sat, 1_000);
+        assert_eq!(change_output_count(&psbt), 1);
     }
 }
