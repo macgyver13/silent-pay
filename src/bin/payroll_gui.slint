@@ -281,6 +281,71 @@ export component PayrollGui inherits Window {
 
                     VerticalLayout {
                         spacing: 14px;
+                        SectionHeader { title: "Addresses"; }
+                        HorizontalLayout {
+                            spacing: 24px;
+                            VerticalLayout {
+                                spacing: 14px;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel { label: "Receive"; }
+                                    Text {
+                                        text: root.receive_address;
+                                        height: 40px;
+                                        color: #d5d5dc;
+                                        font-size: 17px;
+                                        vertical-alignment: center;
+                                    }
+                                    ActionButton { width: 96px; text: "Copy"; clicked => { root.copy_receive_address(); } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel { label: "Change"; }
+                                    Text {
+                                        text: root.change_address;
+                                        height: 40px;
+                                        color: #d5d5dc;
+                                        font-size: 17px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 14px;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel { label: "Receive Index"; width: 112px; }
+                                    LineEditLabel {
+                                        text <=> root.last_derivation_index;
+                                        height: 40px;
+                                        width: 56px;
+                                        edited(text) => {
+                                            root.last_derivation_index = text;
+                                            root.recalculate_receive_address();
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel { label: "Change Index"; width: 112px; }
+                                    LineEditLabel {
+                                        text <=> root.change_derivation_index;
+                                        height: 40px;
+                                        width: 56px;
+                                        edited(text) => {
+                                            root.change_derivation_index = text;
+                                            root.recalculate_receive_address();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Divider {}
+
+                    VerticalLayout {
+                        spacing: 14px;
                         SectionHeader { title: "Descriptor"; }
 
                         HorizontalLayout {
@@ -355,71 +420,6 @@ export component PayrollGui inherits Window {
                 if root.active_tab == 1 : VerticalLayout {
                     padding: 32px;
                     spacing: 24px;
-
-                    VerticalLayout {
-                        spacing: 14px;
-                        SectionHeader { title: "Wallet"; }
-                        HorizontalLayout {
-                            spacing: 24px;
-                            VerticalLayout {
-                                spacing: 14px;
-                                HorizontalLayout {
-                                    spacing: 12px;
-                                    FieldLabel { label: "Receive"; }
-                                    Text {
-                                        text: root.receive_address;
-                                        height: 40px;
-                                        color: #d5d5dc;
-                                        font-size: 17px;
-                                        vertical-alignment: center;
-                                    }
-                                    ActionButton { width: 96px; text: "Copy"; clicked => { root.copy_receive_address(); } }
-                                }
-                                HorizontalLayout {
-                                    spacing: 12px;
-                                    FieldLabel { label: "Change"; }
-                                    Text {
-                                        text: root.change_address;
-                                        height: 40px;
-                                        color: #d5d5dc;
-                                        font-size: 17px;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                            VerticalLayout {
-                                spacing: 14px;
-                                HorizontalLayout {
-                                    spacing: 12px;
-                                    FieldLabel { label: "Receive Index"; width: 112px; }
-                                    LineEditLabel {
-                                        text <=> root.last_derivation_index;
-                                        height: 40px;
-                                        width: 56px;
-                                        edited(text) => {
-                                            root.last_derivation_index = text;
-                                            root.recalculate_receive_address();
-                                        }
-                                    }
-                                }
-                                HorizontalLayout {
-                                    spacing: 12px;
-                                    FieldLabel { label: "Change Index"; width: 112px; }
-                                    LineEditLabel {
-                                        text <=> root.change_derivation_index;
-                                        height: 40px;
-                                        width: 56px;
-                                        edited(text) => {
-                                            root.change_derivation_index = text;
-                                            root.recalculate_receive_address();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Divider {}
 
                     VerticalLayout {
                         spacing: 14px;
