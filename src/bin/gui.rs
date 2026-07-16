@@ -31,6 +31,7 @@ slint::slint! {
 
 fn main() -> Result<()> {
     let ui = PayrollGui::new()?;
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     {
         let weak = ui.as_weak();
         ui.on_save_wallet(move || set_status(&weak, save_wallet_from_ui(&weak)));
@@ -65,9 +66,7 @@ fn main() -> Result<()> {
     {
         let weak = ui.as_weak();
         let scan_timer = scan_timer.clone();
-        ui.on_scan_funding_utxos(move || {
-            set_status(&weak, start_funding_scan(&weak, &scan_timer))
-        });
+        ui.on_scan_funding_utxos(move || set_status(&weak, start_funding_scan(&weak, &scan_timer)));
     }
     {
         let weak = ui.as_weak();
@@ -479,6 +478,8 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
     ui.set_finalize_psbt_path(finalize_psbt_path.display().to_string().into());
     let result = finalize_payroll(&finalize_psbt_path)
         .context("failed to finalize PSBT; make sure it contains all required contributions")?;
+    let final_tx = final_tx_from_hex(result.tx_hex.as_str())?;
+    let spent = single_spent_prevout(&final_tx)?;
     let change_derivation_index = parse_u32(
         ui.get_change_derivation_index().as_str(),
         "change derivation index",
@@ -489,35 +490,7 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
         &wallet_from_ui(&ui)?,
         change_derivation_index,
     )?;
-
-    ui.set_final_txid(result.txid.clone().into());
-    ui.set_pending_spent_txid(ui.get_txid());
-    ui.set_pending_spent_vout(ui.get_vout());
-    let change_summary = match change {
-        Some(change) => {
-            let next_change_derivation_index =
-                next_change_derivation_index(change.derivation_index);
-            ui.set_pending_change_txid(result.txid.clone().into());
-            ui.set_pending_change_vout(change.vout.to_string().into());
-            ui.set_pending_change_amount_sat(change.amount_sat.to_string().into());
-            ui.set_pending_change_derivation_index(change.derivation_index.to_string().into());
-            ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
-            // Change advances its own /1/* counter; the receive (/0/*) index is untouched.
-            ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
-            format!(
-                "new change: {}:{}\nchange amount: {}\nchange derivation index: {}\nnext change derivation index: {}",
-                result.txid,
-                change.vout,
-                change.amount_sat,
-                change.derivation_index,
-                next_change_derivation_index
-            )
-        }
-        None => {
-            clear_pending_change(&ui);
-            "new change: none\nchange derivation index unchanged".to_string()
-        }
-    };
+    let finalized_state = apply_finalized_tx_state(&ui, &result.txid, &spent, change)?;
     update_receive_address(&ui)?;
     ui.set_final_tx_hex_path(result.final_tx_hex_path.display().to_string().into());
     ui.set_finalize_summary(
@@ -525,18 +498,22 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
             "txid: {}\nverified SP outputs: {}\nspent input: {}:{}\n{}\nfinal PSBT: {}\nfinal tx hex: {}",
             result.txid,
             result.verified_outputs,
-            ui.get_pending_spent_txid(),
-            ui.get_pending_spent_vout(),
-            change_summary,
+            spent.txid,
+            spent.vout,
+            finalized_state.change_summary,
             result.final_psbt_path.display(),
             result.final_tx_hex_path.display()
         )
         .into(),
     );
-    Ok(format!(
-        "Finalized transaction {}; review and Save UTXO State",
-        result.txid
-    ))
+    if finalized_state.already_processed {
+        Ok(format!("Finalized transaction {}; known UTXO", result.txid))
+    } else {
+        Ok(format!(
+            "Finalized transaction {}; review and Save UTXO State",
+            result.txid
+        ))
+    }
 }
 
 fn save_utxo_state_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
@@ -561,7 +538,12 @@ fn save_utxo_state_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     }
     mark_utxo_spent(&mut utxos, &spent_txid, spent_vout)?;
 
+    let mut next_saved_change_derivation_index = None;
     if !ui.get_pending_change_txid().trim().is_empty() {
+        let change_derivation_index = parse_u32(
+            ui.get_pending_change_derivation_index().as_str(),
+            "pending change derivation index",
+        )?;
         let change = TreasuryUtxo {
             txid: ui.get_pending_change_txid().trim().to_string(),
             vout: ui
@@ -575,18 +557,21 @@ fn save_utxo_state_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
                 .parse()
                 .context("invalid pending change amount_sat")?,
             chain: CHANGE_CHAIN,
-            derivation_index: parse_u32(
-                ui.get_pending_change_derivation_index().as_str(),
-                "pending change derivation index",
-            )?,
+            derivation_index: change_derivation_index,
             status: UtxoStatus::Available,
             label: blank_to_none(ui.get_pending_change_label().as_str()),
         };
         append_fresh_utxo(&mut utxos, change)?;
+        next_saved_change_derivation_index =
+            Some(next_change_derivation_index(change_derivation_index));
     }
     save_utxos(&path, &utxos)?;
     refresh_utxo_rows(&ui, &utxos);
 
+    if let Some(change_derivation_index) = next_saved_change_derivation_index {
+        // Change advances its own /1/* counter only when the finalized UTXO state is committed.
+        ui.set_change_derivation_index(change_derivation_index.to_string().into());
+    }
     save_wallet_from_ui(weak)?;
     Ok("Saved UTXO state".to_string())
 }
@@ -610,34 +595,7 @@ fn load_final_tx_hex_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
         change_prevout_from_tx(&tx, &txid, &wallet_from_ui(&ui)?, change_derivation_index)?;
 
     ui.set_final_tx_hex_path(path.display().to_string().into());
-    ui.set_final_txid(txid.clone().into());
-    ui.set_pending_spent_txid(spent.txid.to_string().into());
-    ui.set_pending_spent_vout(spent.vout.to_string().into());
-    let change_summary = match change {
-        Some(change) => {
-            let next_change_derivation_index =
-                next_change_derivation_index(change.derivation_index);
-            ui.set_pending_change_txid(txid.clone().into());
-            ui.set_pending_change_vout(change.vout.to_string().into());
-            ui.set_pending_change_amount_sat(change.amount_sat.to_string().into());
-            ui.set_pending_change_derivation_index(change.derivation_index.to_string().into());
-            ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
-            // Change advances its own /1/* counter; the receive (/0/*) index is untouched.
-            ui.set_change_derivation_index(next_change_derivation_index.to_string().into());
-            format!(
-                "new change: {}:{}\nchange amount: {}\nchange derivation index: {}\nnext change derivation index: {}",
-                txid,
-                change.vout,
-                change.amount_sat,
-                change.derivation_index,
-                next_change_derivation_index
-            )
-        }
-        None => {
-            clear_pending_change(&ui);
-            "new change: none\nchange derivation index unchanged".to_string()
-        }
-    };
+    let finalized_state = apply_finalized_tx_state(&ui, &txid, &spent, change)?;
     update_receive_address(&ui)?;
     ui.set_finalize_summary(
         format!(
@@ -645,11 +603,15 @@ fn load_final_tx_hex_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
             path.display(),
             spent.txid,
             spent.vout,
-            change_summary
+            finalized_state.change_summary
         )
         .into(),
     );
-    Ok("Loaded final tx hex".to_string())
+    if finalized_state.already_processed {
+        Ok(format!("Loaded final tx hex {txid}; known UTXO"))
+    } else {
+        Ok("Loaded final tx hex".to_string())
+    }
 }
 
 fn broadcast_final_tx_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
@@ -747,7 +709,11 @@ fn start_funding_scan(
                 if let Some(timer) = scan_timer_handle.borrow().as_ref() {
                     timer.stop();
                 }
-                finish_funding_scan(&weak, &utxos_path, Err(anyhow!("scan thread ended unexpectedly")));
+                finish_funding_scan(
+                    &weak,
+                    &utxos_path,
+                    Err(anyhow!("scan thread ended unexpectedly")),
+                );
             }
         }
     });
@@ -1304,6 +1270,82 @@ fn mark_utxo_spent(utxos: &mut UtxoFile, txid: &str, vout: u32) -> Result<()> {
     Ok(())
 }
 
+fn finalized_tx_already_processed(
+    utxos: &UtxoFile,
+    spent: &bitcoin::OutPoint,
+    final_txid: &str,
+) -> bool {
+    let spent_txid = spent.txid.to_string();
+    utxos.utxos.iter().any(|utxo| {
+        (utxo.txid == spent_txid && utxo.vout == spent.vout && utxo.status == UtxoStatus::Spent)
+            || utxo.txid == final_txid
+    })
+}
+
+struct FinalizedTxUiState {
+    change_summary: String,
+    already_processed: bool,
+}
+
+fn apply_finalized_tx_state(
+    ui: &PayrollGui,
+    txid: &str,
+    spent: &bitcoin::OutPoint,
+    change: Option<TreasuryUtxo>,
+) -> Result<FinalizedTxUiState> {
+    let utxos_path = default_path_for_network(
+        ui.get_wallet_network().as_str(),
+        ui.get_data_dir().as_str(),
+        ui.get_utxos_path().as_str(),
+        "utxos.toml",
+    );
+    let utxos = load_utxos_or_default(&utxos_path)?;
+    let already_processed = finalized_tx_already_processed(&utxos, spent, txid);
+
+    ui.set_final_txid(txid.into());
+    let change_summary = if already_processed {
+        clear_pending_utxo_state(ui);
+        "UTXO state: already recorded".to_string()
+    } else {
+        ui.set_pending_spent_txid(spent.txid.to_string().into());
+        ui.set_pending_spent_vout(spent.vout.to_string().into());
+        match change {
+            Some(change) => {
+                let next_change_derivation_index =
+                    next_change_derivation_index(change.derivation_index);
+                ui.set_pending_change_txid(txid.into());
+                ui.set_pending_change_vout(change.vout.to_string().into());
+                ui.set_pending_change_amount_sat(change.amount_sat.to_string().into());
+                ui.set_pending_change_derivation_index(change.derivation_index.to_string().into());
+                ui.set_pending_change_label(change.label.clone().unwrap_or_default().into());
+                format!(
+                    "new change: {}:{}\nchange amount: {}\nchange derivation index: {}\nnext change derivation index: {}",
+                    txid,
+                    change.vout,
+                    change.amount_sat,
+                    change.derivation_index,
+                    next_change_derivation_index
+                )
+            }
+            None => {
+                clear_pending_change(ui);
+                "new change: none\nchange derivation index unchanged".to_string()
+            }
+        }
+    };
+
+    Ok(FinalizedTxUiState {
+        change_summary,
+        already_processed,
+    })
+}
+
+fn clear_pending_utxo_state(ui: &PayrollGui) {
+    ui.set_pending_spent_txid("".into());
+    ui.set_pending_spent_vout("".into());
+    clear_pending_change(ui);
+}
+
 fn clear_pending_change(ui: &PayrollGui) {
     ui.set_pending_change_txid("".into());
     ui.set_pending_change_vout("".into());
@@ -1531,6 +1573,10 @@ fn final_tx_from_hex_file(path: impl AsRef<Path>) -> Result<Transaction> {
     let path = path.as_ref();
     let tx_hex = fs::read_to_string(path)
         .with_context(|| format!("failed to read final tx hex {}", path.display()))?;
+    final_tx_from_hex(tx_hex.as_str())
+}
+
+fn final_tx_from_hex(tx_hex: &str) -> Result<Transaction> {
     let tx_bytes = hex::decode(tx_hex.trim()).context("final tx hex is not valid hex")?;
     bitcoin::consensus::encode::deserialize(&tx_bytes).context("failed to parse final tx")
 }
