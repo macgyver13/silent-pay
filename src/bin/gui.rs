@@ -1561,8 +1561,7 @@ fn update_fee_suggestion(ui: &PayrollGui, recipient_count: usize) {
         .unwrap_or_else(|_| default_fee_rate_sat_vb());
     let suggested = suggested_fee_sat(fee_rate, recipient_count);
     ui.set_suggested_fee_sat(suggested.to_string().into());
-    let current_fee = ui.get_miner_fee_sat();
-    if current_fee.trim().is_empty() || current_fee.as_str() == "1000" {
+    if !ui.get_fee_manually_edited() {
         ui.set_miner_fee_sat(suggested.to_string().into());
     }
 }

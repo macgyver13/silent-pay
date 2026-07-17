@@ -187,6 +187,7 @@ export component PayrollGui inherits Window {
     in-out property <string> vout: "0";
     in-out property <string> prevout_amount_sat: "";
     in-out property <string> miner_fee_sat: "1000";
+    in-out property <bool> fee_manually_edited: false;
     in-out property <string> suggested_fee_sat: "";
     in-out property <string> psbt_path: "";
     in-out property <int> active_tab: 1;
@@ -530,7 +531,10 @@ export component PayrollGui inherits Window {
                             FieldLabel { label: "Amount sats"; width: 96px; }
                             LineEdit { text <=> root.prevout_amount_sat; height: 40px; width: 150px; }
                             FieldLabel { label: "Fee sats"; width: 72px; }
-                            LineEdit { text <=> root.miner_fee_sat; height: 40px; width: 150px; }
+                            LineEdit {
+                                text <=> root.miner_fee_sat; height: 40px; width: 150px;
+                                edited => { root.fee_manually_edited = self.text != ""; }
+                            }
                         }
                         HorizontalLayout {
                             spacing: 12px;
