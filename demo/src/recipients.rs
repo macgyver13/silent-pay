@@ -7,11 +7,10 @@ use anyhow::{bail, Context, Result};
 use bitcoin::Amount;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 use std::fs;
 use std::path::Path;
-
-use silent_pay::recipients::recipient_keys;
 
 /// Demo recipient seeds paired with their payment amount (sats). Each seed
 /// deterministically derives a scan/spend key pair via `recipient_keys`.
@@ -25,6 +24,18 @@ pub const RECIPIENT_SEEDS: [([u8; 32], u64); 5] = [
 
 /// Network used for generated demo silent payment addresses.
 const DEMO_NETWORK: SpNetwork = SpNetwork::Testnet;
+
+pub fn recipient_keys(seed: &[u8; 32]) -> (SecretKey, SecretKey) {
+    (derive_key(seed, b"scan"), derive_key(seed, b"spend"))
+}
+
+fn derive_key(seed: &[u8; 32], tag: &[u8]) -> SecretKey {
+    let mut hasher = Sha256::new();
+    hasher.update(tag);
+    hasher.update(seed);
+    let digest = hasher.finalize();
+    SecretKey::from_slice(&digest).expect("sha256 output is a valid secret key")
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DemoRecipientConfig {

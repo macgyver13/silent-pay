@@ -339,7 +339,7 @@ fn select_recipient_from_ui(weak: &slint::Weak<PayrollGui>, row: i32) -> Result<
     };
     let recipient = &recipients[index];
     ui.set_recipient_label(recipient.label.clone().unwrap_or_default().into());
-    ui.set_recipient_address(recipient.address.clone().unwrap_or_default().into());
+    ui.set_recipient_address(recipient.address.clone().into());
     ui.set_recipient_amount_sat(recipient.amount_sat.to_string().into());
     Ok(format!("Selected recipient row {}", row + 1))
 }
@@ -358,8 +358,7 @@ fn add_recipient_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
             .as_str()
             .parse()
             .context("invalid recipient amount_sat")?,
-        seed_hex: None,
-        address: Some(address),
+        address,
     });
     set_recipient_entries(&ui, &rows);
     Ok("Added recipient row".to_string())
@@ -1031,8 +1030,7 @@ fn recipient_rows(rows: &str) -> Result<Vec<RecipientEntry>> {
             amount_sat: parts[2]
                 .parse()
                 .with_context(|| format!("recipient row {} has invalid amount_sat", idx + 1))?,
-            seed_hex: None,
-            address: Some(parts[1].to_string()),
+            address: parts[1].to_string(),
         });
     }
     Ok(recipients)
@@ -1054,7 +1052,7 @@ fn recipient_entry_table_rows(
     table_rows(recipients.iter().map(|recipient| {
         vec![
             recipient.label.clone().unwrap_or_default(),
-            recipient.address.clone().unwrap_or_default(),
+            recipient.address.clone(),
             recipient.amount_sat.to_string(),
         ]
     }))
@@ -1067,7 +1065,7 @@ fn set_recipient_entries(ui: &PayrollGui, recipients: &[RecipientEntry]) {
             format!(
                 "{},{},{}",
                 recipient.label.clone().unwrap_or_default(),
-                recipient.address.clone().unwrap_or_default(),
+                recipient.address.clone(),
                 recipient.amount_sat
             )
         })

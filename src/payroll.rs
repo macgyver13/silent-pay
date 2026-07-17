@@ -417,8 +417,7 @@ mod tests {
             &[RecipientEntry {
                 label: Some("alice".to_string()),
                 amount_sat,
-                seed_hex: None,
-                address: Some(address.to_string()),
+                address: address.to_string(),
             }],
         )
         .expect("save recipients");

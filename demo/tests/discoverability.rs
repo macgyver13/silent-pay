@@ -1,32 +1,52 @@
 use bitcoin::Amount;
 use psbt::roles::signer::extract_eligible_input_pubkey;
-use secp256k1::{PublicKey, Secp256k1, XOnlyPublicKey};
-use silent_pay::recipients::{address_amounts, parse_recipients, recipient_keys};
+use secp256k1::{PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 use silentpayments::receiving::{Label, Receiver};
 use silentpayments::utils::receiving::PublicTweakData;
 use silentpayments::utils::OutPoint as SpOutPoint;
-use silentpayments::{Network, SpVersion, TransactionInputs, TransactionSharedSecret};
+use silentpayments::{
+    Network, SilentPaymentAddress, SpVersion, TransactionInputs, TransactionSharedSecret,
+};
+use sp_demo::recipients::recipient_keys;
 use sp_demo::workflow;
+
+struct TestRecipient {
+    amount: Amount,
+    address: SilentPaymentAddress,
+    scan_sk: SecretKey,
+    scan_pk: PublicKey,
+    spend_pk: PublicKey,
+}
+
+fn seeded_recipient(
+    secp: &Secp256k1<secp256k1::All>,
+    seed: [u8; 32],
+    amount_sat: u64,
+) -> TestRecipient {
+    let (scan_sk, spend_sk) = recipient_keys(&seed);
+    let scan_pk = PublicKey::from_secret_key(secp, &scan_sk);
+    let spend_pk = PublicKey::from_secret_key(secp, &spend_sk);
+    TestRecipient {
+        amount: Amount::from_sat(amount_sat),
+        address: SilentPaymentAddress::new(scan_pk, spend_pk, Network::Mainnet, SpVersion::ZERO),
+        scan_sk,
+        scan_pk,
+        spend_pk,
+    }
+}
 
 #[test]
 fn sp_outputs_discoverable_by_recipients() {
     let secp = Secp256k1::new();
     let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX).expect("key setup");
-    let recipients = parse_recipients(
-        r#"
-        [[recipients]]
-        label = "alice"
-        amount_sat = 1000
-        seed_hex = "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
-
-        [[recipients]]
-        label = "bob"
-        amount_sat = 2000
-        seed_hex = "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
-        "#,
-    )
-    .expect("recipient config");
-    let recipient_pairs = address_amounts(&recipients);
+    let recipients = vec![
+        seeded_recipient(&secp, [0xb1; 32], 1_000),
+        seeded_recipient(&secp, [0xc2; 32], 2_000),
+    ];
+    let recipient_pairs: Vec<_> = recipients
+        .iter()
+        .map(|recipient| (recipient.address, recipient.amount))
+        .collect();
 
     let mut psbt = workflow::construct_psbt(&keys, &recipient_pairs).expect("construct");
     psbt.inputs[0].previous_txid =
@@ -78,22 +98,21 @@ fn sp_outputs_discoverable_by_recipients() {
         .collect();
 
     for (idx, recipient) in recipients.iter().enumerate() {
-        let seed = recipient.seed.expect("seed-backed recipient");
-        let (scan_sk, spend_sk) = recipient_keys(&seed);
-        let scan_pk = PublicKey::from_secret_key(&secp, &scan_sk);
-        let spend_pk = PublicKey::from_secret_key(&secp, &spend_sk);
         let receiver = Receiver::new(
             SpVersion::ZERO,
-            scan_pk,
-            spend_pk,
-            Label::new(scan_sk, 0),
+            recipient.scan_pk,
+            recipient.spend_pk,
+            Label::new(recipient.scan_sk, 0),
             Network::Mainnet,
         )
         .expect("receiver");
 
-        let shared =
-            TransactionSharedSecret::new_from_public_tweak_data(&secp, &tweak_data, &scan_sk)
-                .expect("shared secret");
+        let shared = TransactionSharedSecret::new_from_public_tweak_data(
+            &secp,
+            &tweak_data,
+            &recipient.scan_sk,
+        )
+        .expect("shared secret");
         let found = receiver
             .scan_transaction(&shared, &candidates)
             .expect("scan");

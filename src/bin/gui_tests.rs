@@ -457,14 +457,12 @@ fn total_recipient_amount_sums_recipient_rows() {
     let recipients = vec![
         RecipientEntry {
             label: None,
-            seed_hex: None,
-            address: Some("tb1recipient1".to_string()),
+            address: "tb1recipient1".to_string(),
             amount_sat: 1_000,
         },
         RecipientEntry {
             label: Some("second".to_string()),
-            seed_hex: None,
-            address: Some("tb1recipient2".to_string()),
+            address: "tb1recipient2".to_string(),
             amount_sat: 2_500,
         },
     ];
