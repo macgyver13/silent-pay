@@ -12,7 +12,7 @@ use silent_pay::{
 };
 use silentpayments::Network as SpNetwork;
 use slint::{
-    ComponentHandle, ModelRc, SharedString, StandardListViewItem, Timer, TimerMode, VecModel,
+    ComponentHandle, Model, ModelRc, SharedString, StandardListViewItem, Timer, TimerMode, VecModel,
 };
 use std::cell::RefCell;
 use std::env;
@@ -291,20 +291,7 @@ fn load_recipients_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     );
     ui.set_recipients_path(path.display().to_string().into());
     let recipients = load_recipients(&path)?;
-    let rows = recipients
-        .iter()
-        .map(|recipient| {
-            format!(
-                "{},{},{}",
-                recipient.label.clone().unwrap_or_default(),
-                recipient.address,
-                recipient.amount.to_sat()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
     ui.set_recipient_table_rows(recipient_table_rows(&recipients));
-    ui.set_recipient_rows(rows.into());
     ui.set_total_payroll_sat(total_payroll_sat(&recipients).to_string().into());
     update_fee_suggestion(&ui, recipients.len());
     Ok("Loaded recipients".to_string())
@@ -312,7 +299,7 @@ fn load_recipients_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
 
 fn save_recipients_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
-    let recipients = recipient_rows(ui.get_recipient_rows().as_str())?;
+    let recipients = recipient_entries_from_table_rows(ui.get_recipient_table_rows())?;
     let path = default_path_for_network(
         ui.get_wallet_network().as_str(),
         ui.get_data_dir().as_str(),
@@ -333,7 +320,7 @@ fn select_recipient_from_ui(weak: &slint::Weak<PayrollGui>, row: i32) -> Result<
     if row < 0 {
         return Ok("No recipient selected".to_string());
     }
-    let recipients = recipient_rows(ui.get_recipient_rows().as_str())?;
+    let recipients = recipient_entries_from_table_rows(ui.get_recipient_table_rows())?;
     let Some(index) = selected_recipient_index(recipients.len(), row) else {
         bail!("selected recipient row is out of range");
     };
@@ -346,7 +333,7 @@ fn select_recipient_from_ui(weak: &slint::Weak<PayrollGui>, row: i32) -> Result<
 
 fn add_recipient_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
-    let mut rows = recipient_rows(ui.get_recipient_rows().as_str())?;
+    let mut rows = recipient_entries_from_table_rows(ui.get_recipient_table_rows())?;
     let address = ui.get_recipient_address().trim().to_string();
     if address.is_empty() {
         bail!("recipient address is required");
@@ -367,7 +354,7 @@ fn add_recipient_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
 fn remove_recipient_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     let ui = weak.upgrade().context("GUI closed")?;
     let row = ui.get_selected_recipient_row();
-    let mut rows = recipient_rows(ui.get_recipient_rows().as_str())?;
+    let mut rows = recipient_entries_from_table_rows(ui.get_recipient_table_rows())?;
     let Some(index) = selected_recipient_index(rows.len(), row) else {
         bail!("select a recipient row to remove");
     };
@@ -396,7 +383,7 @@ fn save_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_psbt_path(psbt_path.display().to_string().into());
 
     let wallet = wallet_from_ui(&ui)?;
-    let recipients = recipient_rows(ui.get_recipient_rows().as_str())?;
+    let recipients = recipient_entries_from_table_rows(ui.get_recipient_table_rows())?;
     let recipients_path = default_path_for_network(
         wallet.network.as_str(),
         ui.get_data_dir().as_str(),
@@ -1014,26 +1001,43 @@ fn bitcoin_network(network: SpNetwork) -> Network {
     }
 }
 
-fn recipient_rows(rows: &str) -> Result<Vec<RecipientEntry>> {
+fn recipient_entries_from_table_rows(
+    rows: ModelRc<ModelRc<StandardListViewItem>>,
+) -> Result<Vec<RecipientEntry>> {
     let mut recipients = Vec::new();
-    for (idx, line) in rows.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let parts: Vec<_> = line.splitn(3, ',').map(str::trim).collect();
-        if parts.len() != 3 {
-            bail!("recipient row {} must be label,address,amount_sat", idx + 1);
-        }
+    for idx in 0..rows.row_count() {
+        let row = rows
+            .row_data(idx)
+            .with_context(|| format!("recipient row {} is missing", idx + 1))?;
+        let label = table_cell_text(&row, idx, 0)?;
+        let address = table_cell_text(&row, idx, 1)?;
+        let amount_sat = table_cell_text(&row, idx, 2)?;
         recipients.push(RecipientEntry {
-            label: blank_to_none(parts[0]),
-            amount_sat: parts[2]
+            label: blank_to_none(label.as_str()),
+            amount_sat: amount_sat
+                .as_str()
                 .parse()
                 .with_context(|| format!("recipient row {} has invalid amount_sat", idx + 1))?,
-            address: parts[1].to_string(),
+            address: address.trim().to_string(),
         });
     }
     Ok(recipients)
+}
+
+fn table_cell_text(
+    row: &ModelRc<StandardListViewItem>,
+    row_idx: usize,
+    column_idx: usize,
+) -> Result<String> {
+    row.row_data(column_idx)
+        .map(|item| item.text.to_string())
+        .with_context(|| {
+            format!(
+                "recipient row {} is missing column {}",
+                row_idx + 1,
+                column_idx + 1
+            )
+        })
 }
 
 fn recipient_table_rows(recipients: &[PayrollRecipient]) -> ModelRc<ModelRc<StandardListViewItem>> {
@@ -1059,19 +1063,6 @@ fn recipient_entry_table_rows(
 }
 
 fn set_recipient_entries(ui: &PayrollGui, recipients: &[RecipientEntry]) {
-    let rows = recipients
-        .iter()
-        .map(|recipient| {
-            format!(
-                "{},{},{}",
-                recipient.label.clone().unwrap_or_default(),
-                recipient.address.clone(),
-                recipient.amount_sat
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    ui.set_recipient_rows(rows.into());
     ui.set_recipient_table_rows(recipient_entry_table_rows(recipients));
     ui.set_total_payroll_sat(total_recipient_amount_sat(recipients).to_string().into());
     update_fee_suggestion(ui, recipients.len());

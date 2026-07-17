@@ -453,7 +453,45 @@ fn selected_recipient_index_rejects_out_of_range_rows() {
 }
 
 #[test]
-fn total_recipient_amount_sums_recipient_rows() {
+fn recipient_table_rows_preserve_commas_in_labels() {
+    let rows = table_rows(vec![vec![
+        "Ops, East".to_string(),
+        "tb1recipient1".to_string(),
+        "1000".to_string(),
+    ]]);
+
+    let recipients = recipient_entries_from_table_rows(rows).unwrap();
+
+    assert_eq!(recipients.len(), 1);
+    assert_eq!(recipients[0].label.as_deref(), Some("Ops, East"));
+    assert_eq!(recipients[0].address, "tb1recipient1");
+    assert_eq!(recipients[0].amount_sat, 1_000);
+}
+
+#[test]
+fn recipient_table_rows_reject_invalid_amounts() {
+    let rows = table_rows(vec![vec![
+        "ops".to_string(),
+        "tb1recipient1".to_string(),
+        "not sats".to_string(),
+    ]]);
+
+    let err = recipient_entries_from_table_rows(rows).unwrap_err();
+
+    assert!(err.to_string().contains("invalid amount_sat"));
+}
+
+#[test]
+fn recipient_table_rows_reject_missing_columns() {
+    let rows = table_rows(vec![vec!["ops".to_string(), "tb1recipient1".to_string()]]);
+
+    let err = recipient_entries_from_table_rows(rows).unwrap_err();
+
+    assert!(err.to_string().contains("missing column 3"));
+}
+
+#[test]
+fn total_recipient_amount_sums_recipient_entries() {
     let recipients = vec![
         RecipientEntry {
             label: None,
