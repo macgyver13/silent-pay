@@ -1,0 +1,29 @@
+[[recipients]]
+label = "recipient-1"
+amount_sat = 180000
+address = "tsp1qqvaathesys45acsp5t0rwnquu2jtgamj0gawjlnxe9ez9pencv7kyqhvzu65efrhy97dnny8n4qsvczg5fvlsdke993m0yplnwsyced22vg40qz4"
+scan_key_hex = "998f86a68e7382cab144db4ebbdd93f6c39fb0ec800a6368f7b521312e56c0dc"
+
+[[recipients]]
+label = "recipient-2"
+amount_sat = 160000
+address = "tsp1qqfhemqfeg3ksdxpn2whxj8wrqsm7sv2r6m93hnkhkjjfaas7uasdwqs97he8aaym805fjw7gmvgwzckptwnz8vr5nefpp7xfrpwd77pshvx35tqx"
+scan_key_hex = "294efecdc5f518bcef0111112b1f0388e72d9502913383b7658d3dedb7904de2"
+
+[[recipients]]
+label = "recipient-3"
+amount_sat = 1500000
+address = "tsp1qq265v49cd8psjl36mn7mg283d7m4w0d06xswnarfnh4n8yzlls04qqkmuyvvg379t7upjac7lty56h7g2t8xa8mazdket7rac49s0qlmkczrwmus"
+scan_key_hex = "f35d3374a543fcd665c97c5871bb23edc0b61bd20984436963613a313130a7f4"
+
+[[recipients]]
+label = "recipient-4"
+amount_sat = 100000
+address = "tsp1qq0c3z3k8y6hs34vhfzl4zyg754qyjasa8sd3djqkzpf8k887k3pv7qmcjh3e4ks7wrzepp2wh8gmg8err2zqfxpyxm2hmarnm0hepsu9jyuvuxf2"
+scan_key_hex = "1eb314b866f150d416090bab5afbc66d3ed18fe9abbaf8ddd916d7ae6c4f1d27"
+
+[[recipients]]
+label = "recipient-5"
+amount_sat = 200000
+address = "tsp1qqfk6p89w4xuyjk9mg8gfp7k8mzx8ngfy4ym4qxm7haka6dmwxk8y6qlqh3hfjm2fe7sxscedkw3qt4u0shswv7ng4fq0kjjjlqchh0tsyg24u9m8"
+scan_key_hex = "faf9380bca3a0118ff2477ef87b6f1c8785564b20f010403aaa8cb4f20553ccf"

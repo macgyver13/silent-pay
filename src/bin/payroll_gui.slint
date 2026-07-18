@@ -1,0 +1,710 @@
+import { LineEdit, ScrollView, StandardTableView, TextEdit } from "std-widgets.slint";
+
+component NavButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> selected;
+    callback clicked();
+
+    height: 48px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: selected ? #6b5848 : #7d7d90;
+    background: selected ? #26252b : #17171d;
+
+    HorizontalLayout {
+        alignment: center;
+        spacing: icon == "" ? 0px : 10px;
+        Text {
+            text: icon;
+            color: selected ? #f0ad56 : #9b9ba6;
+            font-size: 18px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.text;
+            color: selected ? #f3f3f6 : #92929c;
+            font-size: 16px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <string> tone: "normal";
+    callback clicked();
+
+    height: 40px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: tone == "primary" ? #d19142 : tone == "good" ? #496348 : tone == "danger" ? #684542 : #34343f;
+    background: tone == "primary" ? #edae57 : tone == "good" ? #253924 : tone == "danger" ? #392323 : #24242c;
+
+    Text {
+        text: root.text;
+        color: tone == "primary" ? #19130b : tone == "good" ? #a9d6a4 : tone == "danger" ? #eba09b : #d5d5dc;
+        font-size: 14px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component SectionHeader inherits Rectangle {
+    in property <string> title;
+    in property <bool> show-toggle: false;
+    in property <bool> shown: true;
+    callback toggle();
+
+    height: 44px;
+    background: transparent;
+
+    HorizontalLayout {
+        Text {
+            text: root.title;
+            color: #f5f5f7;
+            font-size: 22px;
+            font-weight: 800;
+            vertical-alignment: center;
+        }
+        Rectangle {}
+        if root.show-toggle : ActionButton {
+            width: 80px;
+            text: root.shown ? "Hide" : "Show";
+            clicked => {
+                root.toggle();
+            }
+        }
+    }
+}
+
+component FieldLabel inherits Text {
+    in property <string> label;
+    text: label;
+    width: 86px;
+    color: #9a9aa5;
+    font-size: 14px;
+    font-weight: 700;
+    vertical-alignment: center;
+}
+
+component LineEditLabel inherits Rectangle {
+    in-out property <string> text;
+    callback edited(string);
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: #34343f;
+    background: #353535;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+
+        TextInput {
+            text <=> root.text;
+            color: #787881;
+            font-size: 14px;
+            font-weight: 700;
+            vertical-alignment: center;
+            edited => {
+                root.edited(self.text);
+            }
+        }
+    }
+}
+
+component Divider inherits Rectangle {
+    height: 1px;
+    background: #27272f;
+}
+
+component ScrollBottomSpacer inherits Rectangle {
+    height: 72px;
+    background: transparent;
+}
+
+export component PayrollGui inherits Window {
+    title: "Silent Pay";
+    preferred-width: 1274px;
+    preferred-height: 860px;
+    min-width: 760px;
+    min-height: 680px;
+    max-width: 4096px;
+    max-height: 4096px;
+
+    in-out property <string> app_version: "";
+    in-out property <string> wallet_path: "wallet.toml";
+    in-out property <string> wallet_network: "testnet";
+    in-out property <string> data_dir: ".";
+    in-out property <string> fee_rate_sat_vb: "4";
+    in-out property <string> dust_limit_sat: "546";
+    in-out property <string> last_derivation_index: "0";
+    in-out property <string> change_derivation_index: "0";
+    in-out property <string> receive_address: "";
+    in-out property <string> change_address: "";
+    in-out property <string> utxo_chain: "0";
+    in-out property <string> utxo_derivation_index: "0";
+    in-out property <string> descriptor: "";
+    in-out property <[[StandardListViewItem]]> signer_rows;
+    in-out property <string> utxos_path: "utxos.toml";
+    in-out property <[[StandardListViewItem]]> available_utxo_rows;
+    in-out property <[[StandardListViewItem]]> spent_utxo_rows;
+    in-out property <int> selected_available_utxo_row: -1;
+    in-out property <bool> scan_in_progress: false;
+    in-out property <int> scan_progress: 0;
+    in-out property <int> active_utxo_tab: 0;
+    in-out property <bool> show_utxos: true;
+    in-out property <bool> show_recipients: true;
+    in-out property <string> pending_spent_txid: "";
+    in-out property <string> pending_spent_vout: "";
+    in-out property <string> pending_change_txid: "";
+    in-out property <string> pending_change_vout: "";
+    in-out property <string> pending_change_amount_sat: "";
+    in-out property <string> pending_change_derivation_index: "";
+    in-out property <string> pending_change_label: "";
+    in-out property <string> recipients_path: "recipients.toml";
+    in-out property <string> total_payroll_sat: "0";
+    in-out property <[[StandardListViewItem]]> recipient_table_rows;
+    in-out property <int> selected_recipient_row: -1;
+    in-out property <string> recipient_label: "";
+    in-out property <string> recipient_address: "";
+    in-out property <string> recipient_amount_sat: "";
+    in-out property <string> txid: "";
+    in-out property <string> vout: "0";
+    in-out property <string> prevout_amount_sat: "";
+    in-out property <string> miner_fee_sat: "1000";
+    in-out property <bool> fee_manually_edited: false;
+    in-out property <string> suggested_fee_sat: "";
+    in-out property <string> psbt_path: "";
+    in-out property <int> active_tab: 1;
+    in-out property <string> finalize_psbt_path: "output/payroll-signed.psbt";
+    in-out property <string> final_tx_hex_path: "";
+    in-out property <string> final_txid: "";
+    in-out property <string> finalize_summary: "";
+    in-out property <string> rpc_url: "http://127.0.0.1:18332";
+    in-out property <string> rpc_cookie_file: "";
+    in-out property <string> rpc_user: "";
+    in-out property <string> rpc_password: "";
+    in-out property <string> status: "";
+
+    callback save_wallet();
+    callback recalculate_receive_address();
+    callback copy_receive_address();
+    callback browse_data_dir();
+    callback save_utxos();
+    callback select_utxo(int);
+    callback add_utxo();
+    callback remove_utxo();
+    callback scan_funding_utxos();
+    callback cancel_scan();
+    callback save_utxo_state();
+    callback save_recipients();
+    callback select_recipient(int);
+    callback add_recipient();
+    callback remove_recipient();
+    callback save_psbt();
+    callback pick_finalize_psbt();
+    callback finalize_loaded_psbt();
+    callback load_final_tx_hex();
+    callback broadcast_final_tx();
+
+    Rectangle {
+        background: #101014;
+
+        VerticalLayout {
+            spacing: 0px;
+
+            Rectangle {
+                height: 80px;
+                background: #17171d;
+
+                VerticalLayout {
+                    padding-left: 32px;
+                    padding-right: 32px;
+                    padding-top: 18px;
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        NavButton {
+                            text: "Config";
+                            icon: "[=]";
+                            selected: root.active_tab == 0;
+                            clicked => {
+                                root.active_tab = 0;
+                            }
+                        }
+                        NavButton {
+                            text: "Build";
+                            icon: "[/]";
+                            selected: root.active_tab == 1;
+                            clicked => {
+                                root.active_tab = 1;
+                            }
+                        }
+                        NavButton {
+                            text: "Finalize / Broadcast";
+                            icon: "[o]";
+                            selected: root.active_tab == 2;
+                            clicked => {
+                                root.active_tab = 2;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Divider {}
+
+            main-scroll := ScrollView {
+                vertical-stretch: 1;
+                viewport-width: main-scroll.visible-width;
+
+                VerticalLayout {
+                    width: main-scroll.visible-width;
+
+                if root.active_tab == 0 : VerticalLayout {
+                    padding: 32px;
+                    spacing: 24px;
+
+                    VerticalLayout {
+                        spacing: 14px;
+                        SectionHeader { title: "Addresses"; }
+                        HorizontalLayout {
+                            spacing: 24px;
+                            VerticalLayout {
+                                spacing: 14px;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel { label: "Receive"; }
+                                    Text {
+                                        text: root.receive_address;
+                                        height: 40px;
+                                        color: #d5d5dc;
+                                        font-size: 17px;
+                                        vertical-alignment: center;
+                                    }
+                                    ActionButton { width: 96px; text: "Copy"; clicked => { root.copy_receive_address(); } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel { label: "Change"; }
+                                    Text {
+                                        text: root.change_address;
+                                        height: 40px;
+                                        color: #d5d5dc;
+                                        font-size: 17px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 14px;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel { label: "Receive Index"; width: 112px; }
+                                    LineEditLabel {
+                                        text <=> root.last_derivation_index;
+                                        height: 40px;
+                                        width: 56px;
+                                        edited(text) => {
+                                            root.last_derivation_index = text;
+                                            root.recalculate_receive_address();
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    FieldLabel { label: "Change Index"; width: 112px; }
+                                    LineEditLabel {
+                                        text <=> root.change_derivation_index;
+                                        height: 40px;
+                                        width: 56px;
+                                        edited(text) => {
+                                            root.change_derivation_index = text;
+                                            root.recalculate_receive_address();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Divider {}
+
+                    VerticalLayout {
+                        spacing: 14px;
+                        SectionHeader { title: "Descriptor"; }
+
+                        HorizontalLayout {
+                            Rectangle {}
+                            ActionButton { width: 90px; text: "Save"; clicked => { root.save_wallet(); } }
+                        }
+
+                        FieldLabel { label: "Descriptor"; width: 150px; }
+                        TextEdit {
+                            text <=> root.descriptor;
+                            height: 126px;
+                            font-size: 13px;
+                        }
+
+                        StandardTableView {
+                            height: 170px;
+                            rows <=> root.signer_rows;
+                            columns: [
+                                { title: "XFP", min-width: 70px, width: 100px, horizontal-stretch: 0 },
+                                { title: "Derivation", min-width: 100px, width: 150px, horizontal-stretch: 0 },
+                                { title: "Xpub", min-width: 740px, width: 900px, horizontal-stretch: 1 },
+                            ];
+                        }
+                    }
+
+                    Divider {}
+
+                    VerticalLayout {
+                        spacing: 14px;
+                        SectionHeader { title: "Configuration"; }
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "Version"; }
+                            Text {
+                                text: root.app_version;
+                                height: 40px;
+                                color: #d5d5dc;
+                                font-size: 14px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "Network"; }
+                            LineEdit { text <=> root.wallet_network; height: 40px; width: 780px; }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "Data dir"; }
+                            LineEdit { text <=> root.data_dir; height: 40px; }
+                            ActionButton { width: 112px; text: "Browse"; clicked => { root.browse_data_dir(); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "Fee rate"; }
+                            LineEdit { text <=> root.fee_rate_sat_vb; height: 40px; width: 96px; }
+                            Text { text: "sat/vB"; color: #9a9aa5; font-size: 14px; vertical-alignment: center; }
+                            FieldLabel { label: "Dust limit"; width: 92px; }
+                            LineEdit { text <=> root.dust_limit_sat; height: 40px; width: 150px; }
+                            Text { text: "sat"; color: #9a9aa5; font-size: 14px; vertical-alignment: center; }
+                            Text { text: "Suggested fee " + root.suggested_fee_sat + " sat"; color: #c89a5c; font-size: 13px; vertical-alignment: center; }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "RPC URL"; }
+                            LineEdit { text <=> root.rpc_url; height: 40px; }
+                            FieldLabel { label: "Cookie"; width: 76px; }
+                            LineEdit { text <=> root.rpc_cookie_file; height: 40px; }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "RPC User"; }
+                            LineEdit { text <=> root.rpc_user; height: 40px; }
+                            FieldLabel { label: "Password"; width: 76px; }
+                            LineEdit { text <=> root.rpc_password; height: 40px; }
+                        }
+                    }
+
+                    ScrollBottomSpacer {}
+                }
+
+                if root.active_tab == 1 : VerticalLayout {
+                    padding: 32px;
+                    spacing: 24px;
+
+                    VerticalLayout {
+                        spacing: 14px;
+                        HorizontalLayout {
+                            height: 48px;
+                            Text {
+                                text: "UTXOs";
+                                color: #f5f5f7;
+                                font-size: 22px;
+                                font-weight: 800;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { width: 24px; }
+                            NavButton {
+                                width: 84px;
+                                text: "UTXOs";
+                                icon: "";
+                                selected: root.active_utxo_tab == 0;
+                                clicked => {
+                                    root.active_utxo_tab = 0;
+                                }
+                            }
+                            Rectangle { width: 12px; }
+                            NavButton {
+                                width: 92px;
+                                text: "History";
+                                icon: "";
+                                selected: root.active_utxo_tab == 1;
+                                clicked => {
+                                    root.active_utxo_tab = 1;
+                                }
+                            }
+                            Rectangle {}
+                            ActionButton {
+                                width: 80px;
+                                text: root.show_utxos ? "Hide" : "Show";
+                                clicked => {
+                                    root.show_utxos = !root.show_utxos;
+                                }
+                            }
+                        }
+
+                        if root.show_utxos : VerticalLayout {
+                            spacing: 14px;
+                            if root.active_utxo_tab == 0 : VerticalLayout {
+                                spacing: 14px;
+                                HorizontalLayout {
+                                    Rectangle {}
+                                    if !root.scan_in_progress : ActionButton { width: 190px; text: "[o] Scan for funding"; tone: "primary"; clicked => { root.scan_funding_utxos(); } }
+                                    if root.scan_in_progress : ActionButton { width: 190px; text: "Cancel scan (\{root.scan_progress}%)"; tone: "danger"; clicked => { root.cancel_scan(); } }
+                                    Rectangle { width: 20px; }
+                                    ActionButton { width: 190px; text: "[+] Previous Output"; tone: "good"; clicked => { root.add_utxo(); } }
+                                    Rectangle { width: 20px; }
+                                    ActionButton { width: 190px; text: "[-] Previous Output"; tone: "danger"; clicked => { root.remove_utxo(); } }
+                                    Rectangle { width: 20px; }
+                                    ActionButton { width: 80px; text: "Save"; clicked => { root.save_utxos(); } }
+                                }
+                                StandardTableView {
+                                    height: 264px;
+                                    rows <=> root.available_utxo_rows;
+                                    current-row <=> root.selected_available_utxo_row;
+                                    columns: [
+                                        { title: "Txid", min-width: 560px, width: 570px, horizontal-stretch: 1 },
+                                        { title: "Vout", min-width: 90px, width: 90px, horizontal-stretch: 0 },
+                                        { title: "Chain", min-width: 90px, width: 90px, horizontal-stretch: 0 },
+                                        { title: "Index", min-width: 70px, width: 70px, horizontal-stretch: 0 },
+                                        { title: "Amount sats", min-width: 120px, width: 130px, horizontal-stretch: 0 },
+                                        { title: "Label", min-width: 160px, width: 280px, horizontal-stretch: 1 },
+                                    ];
+                                    current-row-changed(row) => {
+                                        root.select_utxo(row);
+                                    }
+                                }
+                            }
+                            if root.active_utxo_tab == 1 : StandardTableView {
+                                height: 236px;
+                                rows <=> root.spent_utxo_rows;
+                                columns: [
+                                    { title: "Txid", min-width: 560px, width: 570px, horizontal-stretch: 1 },
+                                    { title: "Vout", min-width: 90px, width: 90px, horizontal-stretch: 0 },
+                                    { title: "Chain", min-width: 90px, width: 90px, horizontal-stretch: 0 },
+                                    { title: "Index", min-width: 70px, width: 70px, horizontal-stretch: 0 },
+                                    { title: "Amount sats", min-width: 120px, width: 130px, horizontal-stretch: 0 },
+                                    { title: "Label", min-width: 160px, width: 280px, horizontal-stretch: 1 },
+                                ];
+                            }
+                        }
+                    }
+
+                    Divider {}
+
+                    VerticalLayout {
+                        spacing: 14px;
+                        SectionHeader { title: "Payroll"; }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "Txid"; }
+                            LineEdit { text <=> root.txid; height: 40px; preferred-width: 600px; }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "Vout"; }
+                            LineEditLabel { text <=> root.vout; height: 40px; width: 56px; }
+                            FieldLabel { label: "Chain"; width: 56px; }
+                            LineEditLabel { text <=> root.utxo_chain; height: 40px; width: 56px; }
+                            FieldLabel { label: "UTXO Index"; width: 96px; }
+                            LineEditLabel { text <=> root.utxo_derivation_index; height: 40px; width: 56px; }
+                            FieldLabel { label: "Amount sats"; width: 96px; }
+                            LineEdit { text <=> root.prevout_amount_sat; height: 40px; width: 150px; }
+                            FieldLabel { label: "Fee sats"; width: 72px; }
+                            LineEdit {
+                                text <=> root.miner_fee_sat; height: 40px; width: 150px;
+                                edited => { root.fee_manually_edited = self.text != ""; }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "PSBT Path"; }
+                            LineEdit { text <=> root.psbt_path; height: 40px; preferred-width: 600px; }
+                            ActionButton { width: 150px; text: "Create PSBT"; tone: "primary"; clicked => { root.save_psbt(); } }
+                        }
+                    }
+
+                    Divider {}
+
+                    VerticalLayout {
+                        spacing: 14px;
+                        SectionHeader {
+                            title: "Recipients";
+                            show-toggle: true;
+                            shown: root.show_recipients;
+                            toggle => {
+                                root.show_recipients = !root.show_recipients;
+                            }
+                        }
+
+                        if root.show_recipients : VerticalLayout {
+                            spacing: 14px;
+                            HorizontalLayout {
+                                spacing: 12px;
+                                alignment: end;
+                                FieldLabel { label: "Total"; }
+                                Text {
+                                    text: root.total_payroll_sat + " sat";
+                                    color: #d5d5dc;
+                                    font-size: 16px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            StandardTableView {
+                                height: 230px;
+                                rows <=> root.recipient_table_rows;
+                                current-row <=> root.selected_recipient_row;
+                                columns: [
+                                    { title: "Label", min-width: 160px, width: 200px, horizontal-stretch: 0 },
+                                    { title: "Address", min-width: 560px, width: 870px, horizontal-stretch: 1 },
+                                    { title: "Amount sat", min-width: 120px, width: 130px, horizontal-stretch: 0 },
+                                ];
+                                current-row-changed(row) => {
+                                    root.select_recipient(row);
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                FieldLabel { label: "Label"; }
+                                LineEdit { text <=> root.recipient_label; height: 40px; width: 190px; }
+                                FieldLabel { label: "Address"; width: 72px; }
+                                LineEdit { text <=> root.recipient_address; height: 40px; }
+                                FieldLabel { label: "Amount sat"; width: 96px; }
+                                LineEdit { text <=> root.recipient_amount_sat; height: 40px; width: 130px; }
+                            }
+                            HorizontalLayout {
+                                Rectangle {}
+                                ActionButton { width: 150px; text: "[+] Recipient"; tone: "good"; clicked => { root.add_recipient(); } }
+                                Rectangle { width: 20px; }
+                                ActionButton { width: 150px; text: "[-] Recipient"; tone: "danger"; clicked => { root.remove_recipient(); } }
+                                Rectangle { width: 20px; }
+                                ActionButton { width: 80px; text: "Save"; clicked => { root.save_recipients(); } }
+                            }
+                        }
+                    }
+
+                    ScrollBottomSpacer {}
+                }
+
+                if root.active_tab == 2 : VerticalLayout {
+                    padding: 32px;
+                    spacing: 24px;
+
+                    VerticalLayout {
+                        spacing: 14px;
+                        SectionHeader { title: "Finalize"; }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "Signed PSBT"; width: 120px; }
+                            LineEdit { text <=> root.finalize_psbt_path; height: 40px; }
+                            ActionButton { width: 112px; text: "Browse"; clicked => { root.pick_finalize_psbt(); } }
+                            ActionButton { width: 112px; text: "Finalize"; tone: "primary"; clicked => { root.finalize_loaded_psbt(); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "Final Tx Hex"; width: 120px; }
+                            TextEdit { text <=> root.final_tx_hex_path; height: 76px; }
+                            ActionButton { width: 130px; text: "Load Tx Hex"; clicked => { root.load_final_tx_hex(); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "Txid"; width: 120px; }
+                            LineEdit { text <=> root.final_txid; height: 40px; }
+                        }
+                        TextEdit {
+                            text <=> root.finalize_summary;
+                            height: 160px;
+                            font-size: 13px;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 14px;
+                        SectionHeader { title: "Pending UTXO State"; }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            FieldLabel { label: "Vout"; }
+                            LineEdit { text <=> root.pending_change_vout; height: 40px; width: 96px; }
+                            FieldLabel { label: "Change Index"; width: 112px; }
+                            LineEdit { text <=> root.pending_change_derivation_index; height: 40px; width: 96px; }
+                            FieldLabel { label: "Amount sat"; width: 96px; }
+                            LineEdit { text <=> root.pending_change_amount_sat; height: 40px; width: 150px; }
+                            FieldLabel { label: "Label"; width: 60px; }
+                            LineEdit { text <=> root.pending_change_label; height: 40px; width: 180px; }
+                            ActionButton { width: 170px; text: "Save UTXO State"; tone: "primary"; clicked => { root.save_utxo_state(); } }
+                        }
+                    }
+
+                    Divider {}
+
+                    HorizontalLayout {
+                        SectionHeader { title: "Broadcast"; width: 240px; }
+                        Text {
+                            text: "Uses the RPC connection from Config.";
+                            color: #9a9aa5;
+                            font-size: 15px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {}
+                        ActionButton { width: 130px; text: "Broadcast"; tone: "primary"; clicked => { root.broadcast_final_tx(); } }
+                    }
+
+                    ScrollBottomSpacer {}
+                }
+                }
+            }
+
+            Divider {}
+
+            Rectangle {
+                height: 34px;
+                background: #14141a;
+                HorizontalLayout {
+                    padding-left: 18px;
+                    padding-right: 18px;
+                    Text {
+                        text: root.status == "" ? "Ready" : root.status;
+                        color: root.status == "" ? #8d8d98 : #e8ad5b;
+                        font-size: 13px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}

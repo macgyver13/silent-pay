@@ -14,7 +14,9 @@ pub struct TreasuryWalletConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor: Option<String>,
     #[serde(default)]
-    pub derivation_index: u32,
+    pub last_derivation_index: u32,
+    #[serde(default = "default_change_derivation_index")]
+    pub change_derivation_index: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signers: Vec<TreasurySigner>,
 }
@@ -34,14 +36,47 @@ pub fn load_wallet(path: impl AsRef<Path>) -> Result<TreasuryWalletConfig> {
 }
 
 pub fn save_wallet(path: impl AsRef<Path>, wallet: &TreasuryWalletConfig) -> Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+    }
     let normalized = wallet.normalized()?;
-    fs::write(path.as_ref(), toml::to_string_pretty(&normalized)?)
-        .with_context(|| format!("failed to write wallet config {}", path.as_ref().display()))
+    fs::write(path, toml::to_string_pretty(&normalized)?)
+        .with_context(|| format!("failed to write wallet config {}", path.display()))
 }
 
 pub fn parse_wallet(contents: &str) -> Result<TreasuryWalletConfig> {
-    let wallet: TreasuryWalletConfig = toml::from_str(contents).context("failed to parse wallet TOML")?;
+    let raw: RawTreasuryWalletConfig =
+        toml::from_str(contents).context("failed to parse wallet TOML")?;
+    let wallet = TreasuryWalletConfig {
+        network: raw.network,
+        descriptor: raw.descriptor,
+        last_derivation_index: raw.last_derivation_index,
+        // Change lives on its own BIP-32 internal chain (/1/*), so its index is
+        // independent of the receive (/0/*) index and starts at 0.
+        change_derivation_index: raw
+            .change_derivation_index
+            .unwrap_or_else(default_change_derivation_index),
+        signers: raw.signers,
+    };
     wallet.normalized()
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTreasuryWalletConfig {
+    #[serde(default = "default_network")]
+    network: String,
+    #[serde(default)]
+    descriptor: Option<String>,
+    #[serde(default)]
+    last_derivation_index: u32,
+    #[serde(default)]
+    change_derivation_index: Option<u32>,
+    #[serde(default)]
+    signers: Vec<TreasurySigner>,
 }
 
 impl TreasuryWalletConfig {
@@ -59,14 +94,16 @@ impl TreasuryWalletConfig {
             bail!("N-of-N MuSig2 wallet requires at least two signers");
         }
         for (idx, signer) in signers.iter().enumerate() {
-            signer.validate(network)
+            signer
+                .validate(network)
                 .with_context(|| format!("signer[{idx}] is invalid"))?;
         }
         let descriptor = Some(descriptor_from_signers(&signers));
         Ok(Self {
             network: network_name(network).to_string(),
             descriptor,
-            derivation_index: self.derivation_index,
+            last_derivation_index: self.last_derivation_index,
+            change_derivation_index: self.change_derivation_index,
             signers,
         })
     }
@@ -76,7 +113,10 @@ impl TreasuryWalletConfig {
     }
 
     pub fn descriptor_string(&self) -> Result<String> {
-        Ok(self.normalized()?.descriptor.expect("normalized descriptor"))
+        Ok(self
+            .normalized()?
+            .descriptor
+            .expect("normalized descriptor"))
     }
 }
 
@@ -128,7 +168,9 @@ fn parse_descriptor_signers(descriptor: &str) -> Result<Vec<TreasurySigner>> {
     let body = descriptor
         .strip_prefix("tr(musig(")
         .and_then(|s| s.strip_suffix(")/0/*)"))
-        .ok_or_else(|| anyhow::anyhow!("descriptor must look like tr(musig([xfp/path]xpub,...)/0/*)"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("descriptor must look like tr(musig([xfp/path]xpub,...)/0/*)")
+        })?;
     body.split(',')
         .enumerate()
         .map(|(idx, part)| parse_descriptor_signer(idx, part.trim()))
@@ -170,6 +212,10 @@ fn default_network() -> String {
     "testnet".to_string()
 }
 
+fn default_change_derivation_index() -> u32 {
+    0
+}
+
 fn network_name(network: SpNetwork) -> &'static str {
     match network {
         SpNetwork::Mainnet => "bitcoin",
@@ -205,17 +251,44 @@ mod tests {
         .expect("wallet");
 
         assert_eq!(wallet.signers.len(), 2);
-        assert_eq!(wallet.derivation_index, 0);
+        assert_eq!(wallet.last_derivation_index, 0);
+        assert_eq!(wallet.change_derivation_index, 0);
         assert!(wallet.descriptor.unwrap().starts_with("tr(musig("));
     }
 
     #[test]
+    fn parses_derivation_indices() {
+        let wallet = parse_wallet(&format!(
+            r#"
+            network = "testnet"
+            last_derivation_index = 3
+            change_derivation_index = 4
+
+            [[signers]]
+            xfp = "0f056943"
+            derivation_path = "m/48h/1h/0h/3h"
+            xpub = "{XPUB1}"
+
+            [[signers]]
+            xfp = "6ba6cfd0"
+            derivation_path = "m/48h/1h/0h/3h"
+            xpub = "{XPUB2}"
+            "#
+        ))
+        .expect("wallet");
+
+        assert_eq!(wallet.last_derivation_index, 3);
+        assert_eq!(wallet.change_derivation_index, 4);
+    }
+
+    #[test]
     fn parses_descriptor() {
-        let descriptor = format!(
-            "tr(musig([0f056943/48h/1h/0h/3h]{XPUB1},[6ba6cfd0/48h/1h/0h/3h]{XPUB2})/0/*)"
-        );
-        let wallet = parse_wallet(&format!("network = \"testnet\"\ndescriptor = \"{descriptor}\"\n"))
-            .expect("wallet");
+        let descriptor =
+            format!("tr(musig([0f056943/48h/1h/0h/3h]{XPUB1},[6ba6cfd0/48h/1h/0h/3h]{XPUB2})/0/*)");
+        let wallet = parse_wallet(&format!(
+            "network = \"testnet\"\ndescriptor = \"{descriptor}\"\n"
+        ))
+        .expect("wallet");
         assert_eq!(wallet.signers.len(), 2);
     }
 

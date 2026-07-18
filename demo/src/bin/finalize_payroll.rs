@@ -27,11 +27,11 @@ fn parse_args() -> Result<PathBuf> {
         std::process::exit(0);
     }
     if args.next().is_some() {
-        bail!("finalize_payroll accepts exactly one PSBT path");
+        bail!("finalize accepts exactly one PSBT path");
     }
     Ok(PathBuf::from(path))
 }
 
 fn print_usage() {
-    eprintln!("Usage: finalize_payroll <path_to_signed_round2.psbt>");
+    eprintln!("Usage: finalize <path_to_signed.psbt>");
 }
