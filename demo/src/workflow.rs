@@ -14,20 +14,12 @@ use musig2::SecNonce;
 use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 
-use psbt::core::utils::to_psbt_dleq;
+use psbt::core::utils::{to_psbt_dleq, to_sp_v0_info};
 use psbt::{generate_dleq_proof, verify_dleq_proof, Psbt};
 use psbt_v2::{Output, PartialEcdhShareData};
 
 use psbt::musig2::{build_psbt, finalize_sp_outputs};
 use psbt::roles::musig2_signer as signing;
-
-/// Build the 66-byte PSBT_OUT_SP_V0_INFO payload (scan_key || spend_key).
-fn sp_v0_info_bytes(address: &SilentPaymentAddress) -> [u8; 66] {
-    let mut bytes = [0u8; 66];
-    bytes[..33].copy_from_slice(&address.get_scan_key().serialize());
-    bytes[33..].copy_from_slice(&address.get_spend_key().serialize());
-    bytes
-}
 
 /// How the per-index MuSig2 aggregate key is produced. Mirrors
 /// `psbt::musig2::keyagg::AggregationMode`; kept as a separate demo-local type so
@@ -302,7 +294,7 @@ pub fn construct_psbt(
                 value: *amount,
                 script_pubkey: ScriptBuf::new(),
             });
-            o.sp_v0_info = Some(sp_v0_info_bytes(addr).into());
+            o.sp_v0_info = Some(to_sp_v0_info(addr));
             o
         })
         .collect();

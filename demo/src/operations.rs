@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 
 use crate::recipients::load_demo_recipients;
 use crate::workflow::{self, KeySetup};
-use silent_pay::recipients::{address_amounts, load_recipients};
 
 const FIXTURE_PREV_TXID_HEX: &str =
     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
@@ -112,8 +111,14 @@ pub fn build_payroll(config: BuildPayrollConfig) -> Result<BuildPayrollResult> {
         workflow::DEMO_SP_INDEX,
         workflow::KeyArch::AggregateThenDerive,
     )?;
-    let recipients = load_recipients(&config.recipients_path)?;
-    let recipient_pairs = address_amounts(&recipients);
+    let recipients = load_demo_recipients(&config.recipients_path)?;
+    let recipient_count = recipients.len();
+    // Deliberately discard receiver-only scan keys and retain only the public
+    // sender view needed for payroll construction.
+    let recipient_pairs: Vec<_> = recipients
+        .into_iter()
+        .map(|recipient| (recipient.address, recipient.amount))
+        .collect();
 
     let mut psbt = workflow::construct_psbt(&keys, &recipient_pairs)?;
     psbt.inputs[0].previous_txid = FIXTURE_PREV_TXID_HEX.parse::<Txid>().expect("static txid");
@@ -147,7 +152,7 @@ pub fn build_payroll(config: BuildPayrollConfig) -> Result<BuildPayrollResult> {
         cosigner_contrib_psbt_path,
         descriptor_path,
         descriptor,
-        recipient_count: recipients.len(),
+        recipient_count,
         outputs,
     })
 }
