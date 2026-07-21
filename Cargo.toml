@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "demo"]
+members = [".", "demo", "frost-demo"]
 resolver = "2"
 
 [workspace.dependencies]

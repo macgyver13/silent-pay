@@ -1,0 +1,58 @@
+import { Button } from "std-widgets.slint";
+
+export component CoordinatorWindow inherits Window {
+    title: "FROST Silent Payment Coordinator";
+    width: 680px;
+    height: 430px;
+    in-out property <string> status: "Set up or load a demo wallet";
+    callback provision-wallet();
+    callback load-wallet();
+    callback create-session();
+    callback collect-round-one();
+    callback export-signing();
+    callback collect-round-two();
+    callback finalize-session();
+    VerticalLayout {
+        padding: 20px; spacing: 12px;
+        Text { text: "File-Based FROST Silent Payment Demo"; font-size: 24px; }
+        Text { text: root.status; wrap: word-wrap; }
+        HorizontalLayout { spacing: 8px;
+            Button { text: "Provision 2-of-3 Wallet"; clicked => { root.provision-wallet(); } }
+            Button { text: "Load Wallet"; clicked => { root.load-wallet(); } }
+            Button { text: "Create Initial PSBT"; clicked => { root.create-session(); } }
+        }
+        HorizontalLayout { spacing: 8px;
+            Button { text: "Collect Round One"; clicked => { root.collect-round-one(); } }
+            Button { text: "Export Signing PSBT"; clicked => { root.export-signing(); } }
+        }
+        HorizontalLayout { spacing: 8px;
+            Button { text: "Collect Round Two"; clicked => { root.collect-round-two(); } }
+            Button { text: "Finalize Transaction"; clicked => { root.finalize-session(); } }
+        }
+        Rectangle { height: 1px; background: #777; }
+        Text { text: "Demo share files are plaintext and must never control real funds."; color: #a33; }
+    }
+}
+
+export component CompanionWindow inherits Window {
+    title: "FROST Signing Companion";
+    width: 620px;
+    height: 360px;
+    in-out property <string> status: "No share loaded";
+    in-out property <bool> nonce-active: false;
+    callback load-share();
+    callback process-round-one();
+    callback process-round-two();
+    VerticalLayout {
+        padding: 20px; spacing: 14px;
+        Text { text: "FROST Signing Companion"; font-size: 24px; }
+        Text { text: root.status; wrap: word-wrap; }
+        Button { text: "Load Demo Share"; clicked => { root.load-share(); } }
+        Button { text: "Process Initial PSBT / Export Round One"; clicked => { root.process-round-one(); } }
+        Button { text: "Approve Signing PSBT / Export Round Two"; clicked => { root.process-round-two(); } }
+        if root.nonce-active: Text {
+            text: "Closing now destroys the in-memory nonce. A fresh coordinator session will be required.";
+            color: #a33; wrap: word-wrap;
+        }
+    }
+}
