@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use bitcoin::bip32::{ChildNumber, DerivationPath};
@@ -26,15 +26,21 @@ pub struct PendingRoundOne {
 
 pub struct Companion {
     share: ShareFile,
+    wallet_directory: PathBuf,
     pending: Option<PendingRoundOne>,
 }
 
 impl Companion {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
         let share = ShareFile::load(path)?;
         share.packages()?;
         Ok(Self {
             share,
+            wallet_directory: path
+                .parent()
+                .context("companion share has no parent folder")?
+                .to_owned(),
             pending: None,
         })
     }
@@ -45,6 +51,20 @@ impl Companion {
 
     pub fn has_active_nonce(&self) -> bool {
         self.pending.is_some()
+    }
+
+    pub fn wallet_directory(&self) -> &Path {
+        &self.wallet_directory
+    }
+
+    pub fn round_one_file(&self) -> PathBuf {
+        self.wallet_directory
+            .join(format!("frost-round-one.{}.psbt", self.participant()))
+    }
+
+    pub fn round_two_file(&self) -> PathBuf {
+        self.wallet_directory
+            .join(format!("frost-round-two.{}.psbt", self.participant()))
     }
 
     pub fn round_one<R: RngCore + CryptoRng>(
@@ -407,6 +427,23 @@ mod tests {
         assert!(companion.round_one(&first, &mut rng).is_err());
         assert!(companion.round_two(&second).is_err());
         assert!(companion.has_active_nonce());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn companion_file_names_include_the_round_and_share_identifier() {
+        let directory =
+            std::env::temp_dir().join(format!("frost-file-names-{}", rand::random::<u64>()));
+        let (_, shares) = wallet::provision(&directory).unwrap();
+        let companion = Companion::load(&shares[1]).unwrap();
+        assert_eq!(
+            companion.round_one_file(),
+            directory.join("frost-round-one.2.psbt")
+        );
+        assert_eq!(
+            companion.round_two_file(),
+            directory.join("frost-round-two.2.psbt")
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

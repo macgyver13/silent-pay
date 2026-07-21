@@ -8,9 +8,14 @@ export component CoordinatorWindow inherits Window {
     callback provision-wallet();
     callback load-wallet();
     callback create-session();
+    callback launch-companion-one();
+    callback launch-companion-two();
+    callback launch-companion-three();
     callback collect-round-one();
+    callback auto-collect-round-one();
     callback export-signing();
     callback collect-round-two();
+    callback auto-collect-round-two();
     callback finalize-session();
     VerticalLayout {
         padding: 20px; spacing: 12px;
@@ -22,11 +27,18 @@ export component CoordinatorWindow inherits Window {
             Button { text: "Create Initial PSBT"; clicked => { root.create-session(); } }
         }
         HorizontalLayout { spacing: 8px;
+            Button { text: "Launch Companion 1"; clicked => { root.launch-companion-one(); } }
+            Button { text: "Launch Companion 2"; clicked => { root.launch-companion-two(); } }
+            Button { text: "Launch Companion 3"; clicked => { root.launch-companion-three(); } }
+        }
+        HorizontalLayout { spacing: 8px;
             Button { text: "Collect Round One"; clicked => { root.collect-round-one(); } }
+            Button { text: "Auto Collect Round One"; clicked => { root.auto-collect-round-one(); } }
             Button { text: "Export Signing PSBT"; clicked => { root.export-signing(); } }
         }
         HorizontalLayout { spacing: 8px;
             Button { text: "Collect Round Two"; clicked => { root.collect-round-two(); } }
+            Button { text: "Auto Collect Round Two"; clicked => { root.auto-collect-round-two(); } }
             Button { text: "Finalize Transaction"; clicked => { root.finalize-session(); } }
         }
         Rectangle { height: 1px; background: #777; }
@@ -39,17 +51,21 @@ export component CompanionWindow inherits Window {
     width: 620px;
     height: 360px;
     in-out property <string> status: "No share loaded";
+    in-out property <string> identity: "Identity: no share loaded";
     in-out property <bool> nonce-active: false;
     callback load-share();
     callback process-round-one();
     callback process-round-two();
+    callback process-wallet-folder();
     VerticalLayout {
         padding: 20px; spacing: 14px;
         Text { text: "FROST Signing Companion"; font-size: 24px; }
+        Text { text: root.identity; font-size: 18px; }
         Text { text: root.status; wrap: word-wrap; }
         Button { text: "Load Demo Share"; clicked => { root.load-share(); } }
         Button { text: "Process Initial PSBT / Export Round One"; clicked => { root.process-round-one(); } }
         Button { text: "Approve Signing PSBT / Export Round Two"; clicked => { root.process-round-two(); } }
+        Button { text: "Auto Process Wallet Folder"; clicked => { root.process-wallet-folder(); } }
         if root.nonce-active: Text {
             text: "Closing now destroys the in-memory nonce. A fresh coordinator session will be required.";
             color: #a33; wrap: word-wrap;
