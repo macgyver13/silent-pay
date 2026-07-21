@@ -37,5 +37,5 @@ and threshold cryptographic flow but is intentionally not a broadcast wallet.
 
 FROST fields use the provisional top-level keytypes from `bip375-examples`: input configuration
 `0x30`, commitments `0x31`, signature shares `0x32`, verifying shares `0x33`, and output participant
-shares `0x20`. Demo protocol version, random session ID, and child path use local global keytypes
-`0x50` through `0x52`.
+shares `0x20`. FROST child keys are discovered and authenticated through the standard Taproot
+BIP32 derivation fields; the demo does not define any FROST global keytypes.

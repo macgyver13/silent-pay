@@ -169,8 +169,7 @@ fn main() -> anyhow::Result<()> {
                 .wallet
                 .as_ref()
                 .context("load or provision a wallet first")?;
-            let psbt = protocol::create_initial(wallet, 0, Amount::from_sat(90_000))?;
-            let id = session::validate(&psbt)?;
+            let psbt = protocol::create_initial(wallet, 5, Amount::from_sat(90_000))?;
             let path = state
                 .wallet_directory
                 .as_ref()
@@ -187,8 +186,7 @@ fn main() -> anyhow::Result<()> {
             state.signing = None;
             state.signed = None;
             Ok(format!(
-                "Cleared {removed} prior PSBT/hex artifact(s); initial PSBT exported; session {}",
-                hex::encode(&id[..6]),
+                "Cleared {removed} prior PSBT/hex artifact(s); initial PSBT exported"
             ))
         })();
         report(&window, result);

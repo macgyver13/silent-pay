@@ -71,7 +71,7 @@ The workspace has two crates:
 The demo CLIs exercise the full coordinator flow against fixed key material and
 the recipients in [demo/recipients.toml](demo/recipients.toml):
 
-| Recipe         | Purpose                                                        |
+| Recipe         | Purpose                                                       |
 | -------------- | ------------------------------------------------------------- |
 | `just payroll` | Build the demo payroll PSBTs and Coldcard descriptor          |
 | `just finalize`| Finalize a signed demo PSBT into a broadcastable transaction  |

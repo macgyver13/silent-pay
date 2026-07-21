@@ -5,19 +5,18 @@ use bitcoin::bip32::{ChildNumber, DerivationPath};
 use bitcoin::{Amount, Transaction};
 use frost_secp256k1_tr as frost;
 use psbt::Psbt;
-use rand::{rngs::OsRng, CryptoRng, RngCore};
+use rand::{CryptoRng, RngCore};
 use secp256k1::{PublicKey, Secp256k1};
 use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 
 use crate::derivation::{derive_key, derive_public};
 use crate::frost_psbt::FrostInputExt;
 use crate::frost_spdk::Round1Secret;
-use crate::session;
 use crate::wallet::{PublicWalletFile, ShareFile};
 use crate::workflow;
 
 pub struct PendingRoundOne {
-    session_id: [u8; 32],
+    initial: Psbt,
     secret: Round1Secret,
     key: frost::keys::KeyPackage,
     public: frost::keys::PublicKeyPackage,
@@ -75,9 +74,8 @@ impl Companion {
         if self.pending.is_some() {
             bail!("this companion already holds a nonce for an active session");
         }
-        let session_id = session::validate(initial)?;
-        let path = session::child_path(initial)?;
         let (root_key, root_public) = self.share.packages()?;
+        let path = discover_child_path(initial, &root_public, &self.share.root_fingerprint)?;
         let (key, public, _) = derive_key(&root_key, &root_public, &path)?;
         validate_wallet_binding(
             initial,
@@ -91,7 +89,7 @@ impl Companion {
         let secret =
             workflow::contribute(&Secp256k1::new(), &mut contribution, &key, &public, rng)?;
         self.pending = Some(PendingRoundOne {
-            session_id,
+            initial: initial.clone(),
             secret,
             key,
             public,
@@ -101,15 +99,11 @@ impl Companion {
     }
 
     pub fn round_two(&mut self, signing: &Psbt) -> Result<Psbt> {
-        let session_id = session::validate(signing)?;
         let pending = self.pending.take().context(
             "no in-memory round-one nonce; restart requires a fresh coordinator session",
         )?;
-        if session_id != pending.session_id {
-            self.pending = Some(pending);
-            bail!("signing PSBT belongs to a different FROST session");
-        }
         let result = (|| {
+            validate_session_intent(&pending.initial, signing)?;
             let commitments = signing.inputs[0].frost_commitments()?;
             let identifier = pending.key.identifier().serialize();
             if !commitments.contains_key(&identifier) {
@@ -147,8 +141,6 @@ pub fn create_initial(
     let setup = workflow::setup_public(derived)?;
     let change_setup = workflow::setup_public(change_public)?;
     let mut psbt = workflow::construct_psbt(&setup, &[(setup.sp_address, amount)])?;
-    session::initialize(&mut psbt, &mut OsRng);
-    session::set_child_path(&mut psbt, path[0], path[1]);
     let receive_source = (
         wallet.fingerprint()?,
         DerivationPath::from(vec![
@@ -189,12 +181,8 @@ pub fn collect_round_one(
     if contributions.len() != 2 {
         bail!("exactly two independent round-one PSBTs are required");
     }
-    let session_id = session::validate(initial)?;
     let mut combined = initial.clone();
     for contribution in contributions {
-        if session::validate(contribution)? != session_id {
-            bail!("round-one contribution belongs to a different session");
-        }
         validate_transaction_shape(initial, contribution)?;
         combined = combined.combine_with(contribution.clone())?;
     }
@@ -210,12 +198,8 @@ pub fn collect_round_two(signing: &Psbt, contributions: &[Psbt]) -> Result<Psbt>
     if contributions.len() != 2 {
         bail!("exactly two independent round-two PSBTs are required");
     }
-    let session_id = session::validate(signing)?;
     let mut combined = signing.clone();
     for contribution in contributions {
-        if session::validate(contribution)? != session_id {
-            bail!("round-two contribution belongs to a different session");
-        }
         validate_transaction_shape(signing, contribution)?;
         combined = combined.combine_with(contribution.clone())?;
     }
@@ -226,7 +210,6 @@ pub fn collect_round_two(signing: &Psbt, contributions: &[Psbt]) -> Result<Psbt>
 }
 
 pub fn finalize(wallet: &PublicWalletFile, psbt: &mut Psbt) -> Result<Transaction> {
-    session::validate(psbt)?;
     let public = authenticated_public(wallet, psbt)?;
     let sighash = workflow::compute_sighash(psbt)?;
     let package = workflow::signing_package(psbt, &sighash, &public)?;
@@ -237,8 +220,9 @@ fn authenticated_public(
     wallet: &PublicWalletFile,
     psbt: &Psbt,
 ) -> Result<frost::keys::PublicKeyPackage> {
-    let path = session::child_path(psbt)?;
-    let (expected, _) = derive_public(&wallet.package()?, &path)?;
+    let root = wallet.package()?;
+    let path = discover_child_path(psbt, &root, &wallet.root_fingerprint)?;
+    let (expected, _) = derive_public(&root, &path)?;
     let encoded = public_from_psbt(psbt)?;
     if encoded != expected {
         bail!("PSBT FROST roster does not match the authenticated coordinator wallet");
@@ -266,6 +250,47 @@ fn public_from_psbt(psbt: &Psbt) -> Result<frost::keys::PublicKeyPackage> {
         verifying_key,
         Some(config.min_signers),
     ))
+}
+
+fn discover_child_path(
+    psbt: &Psbt,
+    root_public: &frost::keys::PublicKeyPackage,
+    expected_fingerprint: &str,
+) -> Result<[u32; 2]> {
+    let input = psbt.inputs.first().context("missing FROST input")?;
+    let witness = input
+        .witness_utxo
+        .as_ref()
+        .context("missing witness_utxo")?;
+    let mut matches = Vec::new();
+
+    for (internal_key, (_, (fingerprint, derivation))) in &input.tap_key_origins {
+        if hex::encode(fingerprint.to_bytes()) != expected_fingerprint {
+            continue;
+        }
+        let [first, second] = derivation.as_ref() else {
+            continue;
+        };
+        let path = match (first, second) {
+            (ChildNumber::Normal { index: branch }, ChildNumber::Normal { index })
+                if *branch <= 1 =>
+            {
+                [*branch, *index]
+            }
+            _ => continue,
+        };
+        let (derived, _) = derive_public(root_public, &path)?;
+        let setup = workflow::setup_public(derived)?;
+        if setup.internal_key == *internal_key && setup.p2tr_script == witness.script_pubkey {
+            matches.push(path);
+        }
+    }
+
+    match matches.as_slice() {
+        [path] => Ok(*path),
+        [] => bail!("no Taproot key origin matches the authenticated FROST wallet"),
+        _ => bail!("multiple Taproot key origins match the authenticated FROST wallet"),
+    }
 }
 
 fn recipients(psbt: &Psbt) -> Result<Vec<SilentPaymentAddress>> {
@@ -364,6 +389,40 @@ fn validate_transaction_shape(expected: &Psbt, actual: &Psbt) -> Result<()> {
     Ok(())
 }
 
+fn validate_session_intent(initial: &Psbt, signing: &Psbt) -> Result<()> {
+    if initial.global.tx_version != signing.global.tx_version
+        || initial.global.fallback_lock_time != signing.global.fallback_lock_time
+        || initial.global.input_count != signing.global.input_count
+        || initial.global.output_count != signing.global.output_count
+        || initial.inputs.len() != signing.inputs.len()
+        || initial.outputs.len() != signing.outputs.len()
+    {
+        bail!("signing PSBT does not match the pending round-one intent");
+    }
+    for (a, b) in initial.inputs.iter().zip(&signing.inputs) {
+        if a.previous_txid != b.previous_txid
+            || a.spent_output_index != b.spent_output_index
+            || a.sequence != b.sequence
+            || a.witness_utxo != b.witness_utxo
+            || a.tap_internal_key != b.tap_internal_key
+            || a.tap_key_origins != b.tap_key_origins
+        {
+            bail!("signing PSBT modified a pending round-one input");
+        }
+    }
+    for (a, b) in initial.outputs.iter().zip(&signing.outputs) {
+        let script_matches = if a.sp_v0_info.is_some() {
+            true
+        } else {
+            a.script_pubkey == b.script_pubkey
+        };
+        if a.amount != b.amount || a.sp_v0_info != b.sp_v0_info || !script_matches {
+            bail!("signing PSBT modified a pending round-one output");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn nonce_cannot_be_reused_or_crossed_between_sessions() {
+    fn nonce_is_consumed_after_every_round_two_attempt() {
         let directory = std::env::temp_dir().join(format!("frost-nonce-{}", rand::random::<u64>()));
         let (wallet_path, shares) = wallet::provision(&directory).unwrap();
         let wallet = PublicWalletFile::load(wallet_path).unwrap();
@@ -426,7 +485,30 @@ mod tests {
         companion.round_one(&first, &mut rng).unwrap();
         assert!(companion.round_one(&first, &mut rng).is_err());
         assert!(companion.round_two(&second).is_err());
+        assert!(!companion.has_active_nonce());
+        companion.round_one(&first, &mut rng).unwrap();
         assert!(companion.has_active_nonce());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn initial_psbt_has_no_frost_global_fields() {
+        let directory =
+            std::env::temp_dir().join(format!("frost-no-globals-{}", rand::random::<u64>()));
+        let (wallet_path, _) = wallet::provision(&directory).unwrap();
+        let wallet = PublicWalletFile::load(wallet_path).unwrap();
+        let psbt = create_initial(&wallet, 7, Amount::from_sat(50_000)).unwrap();
+
+        assert!(psbt
+            .global
+            .unknowns
+            .keys()
+            .all(|key| !matches!(key.type_value, 0x50..=0x52)));
+        assert_eq!(
+            discover_child_path(&psbt, &wallet.package().unwrap(), &wallet.root_fingerprint)
+                .unwrap(),
+            [0, 7]
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 
