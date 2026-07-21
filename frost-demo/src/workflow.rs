@@ -11,6 +11,7 @@ use bitcoin::{
 };
 use frost::keys::Tweak;
 use frost_secp256k1_tr as frost;
+use psbt::core::utils::to_sp_v0_info;
 use psbt::roles::{ExtractorPsbtExt, InputWitnessFinalizerPsbtExt};
 use psbt::Psbt;
 use psbt_v2::Output;
@@ -163,10 +164,7 @@ pub fn construct_psbt(
                 value: *amount,
                 script_pubkey: ScriptBuf::new(),
             });
-            let mut info = [0; 66];
-            info[..33].copy_from_slice(&address.get_scan_key().serialize());
-            info[33..].copy_from_slice(&address.get_spend_key().serialize());
-            output.sp_v0_info = Some(info);
+            output.sp_v0_info = Some(to_sp_v0_info(address));
             output
         })
         .collect();
@@ -219,8 +217,12 @@ pub fn contribute<R: RngCore + rand::CryptoRng>(
     let scan_keys: Vec<_> = psbt
         .outputs
         .iter()
-        .filter_map(|output| output.sp_v0_info.map(|info| info[..33].to_vec()))
-        .map(|bytes| PublicKey::from_slice(&bytes).context("parse Silent Payment scan key"))
+        .filter_map(|output| output.sp_v0_info)
+        .map(|info| {
+            info.scan_key()
+                .map(|key| key.0)
+                .context("parse Silent Payment scan key")
+        })
         .collect::<Result<_>>()?;
     for scan_key in scan_keys {
         let mut aux_rand = [0; 32];

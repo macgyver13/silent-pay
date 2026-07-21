@@ -274,8 +274,8 @@ fn recipients(psbt: &Psbt) -> Result<Vec<SilentPaymentAddress>> {
         .filter_map(|output| output.sp_v0_info)
         .map(|info| {
             Ok(SilentPaymentAddress::new(
-                PublicKey::from_slice(&info[..33])?,
-                PublicKey::from_slice(&info[33..])?,
+                info.scan_key().context("parse SP scan key")?.0,
+                info.spend_key().context("parse SP spending key")?.0,
                 SpNetwork::Mainnet,
                 SpVersion::ZERO,
             ))
