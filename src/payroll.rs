@@ -199,6 +199,7 @@ fn derive_wallet_public_keys(
         participant_origins.push((xonly, signer.fingerprint()?, full_path));
     }
 
+    participant_pks.sort_by_key(|key| key.serialize());
     let base_ctx = keyagg::build_key_agg_ctx(&participant_pks)?;
     let untweaked_agg_pk = keyagg::from_musig2_pubkey(&base_ctx.aggregated_pubkey())?;
     let path_indices = vec![chain, derivation_index];
