@@ -280,6 +280,17 @@ fn construct_initial_psbt(
                 &change_keys.untweaked_agg_pk,
                 &change_keys.participant_pks,
             );
+            output.tap_internal_key = Some(change_keys.plain_child_xonly);
+            // Mirrors the input side: the aggregate's [chain, index] path lets a signer
+            // verify the change output rather than trust it. It recomputes the aggregate
+            // from the participant list, checks the synthetic fingerprint, and re-derives
+            // at this path to reproduce PSBT_OUT_TAP_INTERNAL_KEY.
+            output.set_musig2_agg_derivation(
+                &change_keys.untweaked_agg_pk,
+                change_keys.plain_child_xonly,
+                change_keys.chain,
+                change_keys.derivation_index,
+            );
             for (xonly, fingerprint, path) in &change_keys.participant_origins {
                 output
                     .tap_key_origins
@@ -344,7 +355,7 @@ pub fn inspect_initial_payroll_psbt(path: impl AsRef<Path>) -> Result<Psbt> {
 mod tests {
     use super::*;
     use crate::recipients::RecipientEntry;
-    use crate::wallet::TreasurySigner;
+    use crate::wallet::{descriptor_from_signers, TreasurySigner};
     use secp256k1::SecretKey;
     use silentpayments::{SilentPaymentAddress, SpVersion};
     use std::collections::HashSet;
@@ -542,22 +553,111 @@ mod tests {
         );
         assert!(psbt.inputs[0].sp_spend_bip32_derivations.is_empty());
 
-        // Change output carries the same per-participant derivations at the
-        // account-level path (the per-index child is derived synthetically from
-        // the aggregate, not per participant).
-        let change_origins = &psbt
+        // Change output mirrors the input: per-participant derivations at the
+        // account-level path, plus the synthetic aggregate child at
+        // [CHANGE_CHAIN, change_index] keyed by the output's internal key.
+        let change_output = psbt
             .outputs
             .iter()
             .find(|output| output.sp_v0_info.is_none())
-            .expect("change output")
-            .tap_key_origins;
-        assert_eq!(change_origins.len(), 2);
-        for (_, (_, path)) in change_origins.values() {
+            .expect("change output");
+        let change_keys = derive_wallet_public_keys(
+            &secp,
+            &wallet.normalized().expect("wallet"),
+            CHANGE_CHAIN,
+            1,
+        )
+        .expect("keys");
+        let change_internal_key = change_output.tap_internal_key.expect("internal key");
+        assert_eq!(change_internal_key, change_keys.plain_child_xonly);
+
+        let change_origins = &change_output.tap_key_origins;
+        assert_eq!(change_origins.len(), 3);
+        for (xonly, (_, (fp, path))) in change_origins.iter() {
+            if *xonly == change_internal_key {
+                continue;
+            }
+            assert!(signer_fps.contains(fp));
             assert_eq!(
                 *path,
                 DerivationPath::from_str("m/48h/1h/0h/3h").expect("path")
             );
         }
+
+        let (leaf_hashes, (change_fp, change_path)) = change_origins
+            .get(&change_internal_key)
+            .expect("aggregate origin");
+        assert!(leaf_hashes.is_empty());
+        assert_eq!(
+            *change_path,
+            DerivationPath::from_str("m/1/1").expect("path")
+        );
+        assert_eq!(
+            *change_fp,
+            psbt_v2::v2::musig2_agg_fingerprint(&change_keys.untweaked_agg_pk)
+        );
+    }
+
+    /// Replays the checks a hardware signer performs on the change output:
+    /// recompute the bare aggregate from the participant list, verify the synthetic
+    /// fingerprint belongs to it, re-derive at the supplied path to reproduce
+    /// PSBT_OUT_TAP_INTERNAL_KEY, and taproot-tweak that to reproduce the script.
+    #[test]
+    fn change_output_is_verifiable() {
+        let result = build_test_psbt("change_output_is_verifiable", 2_000, 10_000, 1_000, 546)
+            .expect("build psbt");
+        let psbt = inspect_initial_payroll_psbt(&result.psbt_path).expect("inspect");
+        let secp = Secp256k1::new();
+        let change_output = psbt
+            .outputs
+            .iter()
+            .find(|output| output.sp_v0_info.is_none())
+            .expect("change output");
+
+        // 1. The participant list recomputes the bare aggregate.
+        let participant_lists = change_output
+            .parse_musig2_participant_pubkeys()
+            .expect("participant pubkeys");
+        assert_eq!(participant_lists.len(), 1);
+        let (claimed_agg_pk, mut participants) = participant_lists[0].clone();
+        participants.sort_by_key(|key| key.serialize());
+        let ctx = keyagg::build_key_agg_ctx(&participants).expect("key agg");
+        let recomputed_agg_pk = keyagg::from_musig2_pubkey(&ctx.aggregated_pubkey()).expect("agg");
+        assert_eq!(recomputed_agg_pk, claimed_agg_pk);
+
+        // 2. The fingerprint belongs to that aggregate's synthetic root, and the
+        //    origin entry is keyed by the internal key with no leaf hashes.
+        let internal_key = change_output.tap_internal_key.expect("internal key");
+        let (leaf_hashes, (fingerprint, path)) = change_output
+            .tap_key_origins
+            .get(&internal_key)
+            .expect("aggregate origin");
+        assert!(leaf_hashes.is_empty());
+        assert_eq!(
+            *fingerprint,
+            psbt_v2::v2::musig2_agg_fingerprint(&recomputed_agg_pk)
+        );
+
+        // 3. Deriving the aggregate at the supplied path reproduces the internal key.
+        let path_indices: Vec<u32> = path.into_iter().map(|c| u32::from(*c)).collect();
+        let derived =
+            apply_bip328_plain_tweaks(&secp, recomputed_agg_pk, &path_indices).expect("derive");
+        assert_eq!(derived.x_only_public_key().0, internal_key);
+
+        // 4. The path selects the change branch of the registered descriptor.
+        assert_eq!(path_indices[0], CHANGE_CHAIN);
+        assert!(descriptor_from_signers(&test_wallet().signers).ends_with("/<0;1>/*)"));
+
+        // 5. Deriving the descriptor at that branch/index reproduces PSBT_OUT_SCRIPT.
+        let (tweaked_ctx, _) =
+            keyagg::build_tweaked_key_agg_ctx(&secp, &participants, &path_indices)
+                .expect("tweaked agg");
+        let taproot_pk =
+            keyagg::from_musig2_pubkey(&tweaked_ctx.aggregated_pubkey()).expect("taproot");
+        let expected_script = ScriptBuf::new_p2tr_tweaked(
+            TweakedPublicKey::dangerous_assume_tweaked(taproot_pk.x_only_public_key().0),
+        );
+        assert_eq!(change_output.script_pubkey, expected_script);
     }
 
     #[test]
