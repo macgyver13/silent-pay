@@ -405,7 +405,7 @@ fn build_descriptor() -> String {
             format!("[{}/48h/1h/0h/3h]{}", xfp_hex, cosigner.xpub_str)
         })
         .collect();
-    format!("tr(musig({})/0/*)", parts.join(","))
+    format!("tr(musig({})/<0;1>/*)", parts.join(","))
 }
 
 fn payroll_outputs(
