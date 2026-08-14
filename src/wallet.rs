@@ -160,17 +160,19 @@ pub fn descriptor_from_signers(signers: &[TreasurySigner]) -> String {
             format!("[{}/{}]{}", signer.xfp, path, signer.xpub)
         })
         .collect();
-    format!("tr(musig({})/0/*)", parts.join(","))
+    format!("tr(musig({})/<0;1>/*)", parts.join(","))
 }
 
 fn parse_descriptor_signers(descriptor: &str) -> Result<Vec<TreasurySigner>> {
     let descriptor = descriptor.trim();
-    let body = descriptor
-        .strip_prefix("tr(musig(")
-        .and_then(|s| s.strip_suffix(")/0/*)"))
-        .ok_or_else(|| {
-            anyhow::anyhow!("descriptor must look like tr(musig([xfp/path]xpub,...)/0/*)")
-        })?;
+    let inner = descriptor.strip_prefix("tr(musig(").ok_or_else(|| {
+        anyhow::anyhow!("descriptor must look like tr(musig([xfp/path]xpub,...)/<0;1>/*)")
+    })?;
+    // BIP-389 multipath is required: branch 0 is receive, branch 1 is change, so the
+    // change branch is committed to by the registered descriptor rather than assumed.
+    let body = inner.strip_suffix(")/<0;1>/*)").ok_or_else(|| {
+        anyhow::anyhow!("descriptor must look like tr(musig([xfp/path]xpub,...)/<0;1>/*)")
+    })?;
     body.split(',')
         .enumerate()
         .map(|(idx, part)| parse_descriptor_signer(idx, part.trim()))
@@ -283,13 +285,46 @@ mod tests {
 
     #[test]
     fn parses_descriptor() {
-        let descriptor =
-            format!("tr(musig([0f056943/48h/1h/0h/3h]{XPUB1},[6ba6cfd0/48h/1h/0h/3h]{XPUB2})/0/*)");
+        let descriptor = format!(
+            "tr(musig([0f056943/48h/1h/0h/3h]{XPUB1},[6ba6cfd0/48h/1h/0h/3h]{XPUB2})/<0;1>/*)"
+        );
         let wallet = parse_wallet(&format!(
             "network = \"testnet\"\ndescriptor = \"{descriptor}\"\n"
         ))
         .expect("wallet");
         assert_eq!(wallet.signers.len(), 2);
+    }
+
+    #[test]
+    fn rejects_receive_only_descriptor() {
+        let descriptor =
+            format!("tr(musig([0f056943/48h/1h/0h/3h]{XPUB1},[6ba6cfd0/48h/1h/0h/3h]{XPUB2})/0/*)");
+        parse_wallet(&format!(
+            "network = \"testnet\"\ndescriptor = \"{descriptor}\"\n"
+        ))
+        .expect_err("receive-only descriptor must be rejected");
+    }
+
+    #[test]
+    fn descriptor_round_trips_through_parser() {
+        let descriptor = descriptor_from_signers(&[
+            TreasurySigner {
+                xfp: "0f056943".to_string(),
+                derivation_path: "m/48h/1h/0h/3h".to_string(),
+                xpub: XPUB1.to_string(),
+            },
+            TreasurySigner {
+                xfp: "6ba6cfd0".to_string(),
+                derivation_path: "m/48h/1h/0h/3h".to_string(),
+                xpub: XPUB2.to_string(),
+            },
+        ]);
+        assert!(descriptor.ends_with("/<0;1>/*)"));
+        let signers = parse_descriptor_signers(&descriptor).expect("signers");
+        assert_eq!(signers.len(), 2);
+        assert_eq!(signers[0].xfp, "0f056943");
+        assert_eq!(signers[0].derivation_path, "m/48h/1h/0h/3h");
+        assert_eq!(signers[1].xpub, XPUB2);
     }
 
     #[test]
