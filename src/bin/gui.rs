@@ -907,8 +907,7 @@ struct TreasuryUtxo {
     txid: String,
     vout: u32,
     amount_sat: u64,
-    /// BIP-32 chain: RECEIVE_CHAIN (/0/*) or CHANGE_CHAIN (/1/*). Defaults to
-    /// receive for records written before change moved to its own chain.
+    /// BIP-32 chain: RECEIVE_CHAIN (/0/*) or CHANGE_CHAIN (/1/*).
     #[serde(default)]
     chain: u32,
     derivation_index: u32,
