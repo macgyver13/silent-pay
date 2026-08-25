@@ -18,7 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use psbt::musig2::finalize_sp_outputs;
-use psbt::musig2::keyagg::build_tweaked_key_agg_ctx;
+use psbt::musig2::keyagg::{build_tweaked_key_agg_ctx, AggregationMode};
 use psbt::roles::musig2_signer::aggregate_musig2_sigs;
 
 #[derive(Debug, Clone)]
@@ -57,8 +57,16 @@ pub fn finalize_payroll(psbt_path: impl AsRef<Path>) -> Result<FinalizePayrollRe
         ));
     }
     let (_agg_pk, participant_pks) = participants.remove(0);
+    // A missing aggregate origin means the aggregate key was built by deriving each
+    // participant first (BIP-390 ranged participants); see rust-psbt's
+    // `musig2_agg_path` doc comment. It must not be defaulted to [0, 0].
     let path = psbt.inputs[0].musig2_agg_path();
-    let (key_agg_ctx, _gacc) = build_tweaked_key_agg_ctx(&secp, &participant_pks, &path)?;
+    let mode = match path.as_deref() {
+        Some(path) => AggregationMode::AggregateThenDerive { path },
+        None => AggregationMode::DeriveThenAggregate,
+    };
+    let agg = build_tweaked_key_agg_ctx(&secp, &participant_pks, mode)?;
+    let key_agg_ctx = agg.ctx;
 
     // Aggregate the partial signatures already present in the PSBT and extract the tx.
     let message = compute_sighash(&psbt)?;
