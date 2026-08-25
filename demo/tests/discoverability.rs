@@ -9,6 +9,7 @@ use silentpayments::{
 };
 use sp_demo::recipients::recipient_keys;
 use sp_demo::workflow;
+use sp_demo::workflow::KeyArch;
 
 struct TestRecipient {
     amount: Amount,
@@ -35,10 +36,9 @@ fn seeded_recipient(
     }
 }
 
-#[test]
-fn sp_outputs_discoverable_by_recipients() {
+fn sp_outputs_discoverable_by_recipients_impl(arch: KeyArch) {
     let secp = Secp256k1::new();
-    let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX).expect("key setup");
+    let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX, arch).expect("key setup");
     let recipients = vec![
         seeded_recipient(&secp, [0xb1; 32], 1_000),
         seeded_recipient(&secp, [0xc2; 32], 2_000),
@@ -125,9 +125,18 @@ fn sp_outputs_discoverable_by_recipients() {
 }
 
 #[test]
-fn rejects_incomplete_musig2_contributor_set() {
+fn sp_outputs_discoverable_by_recipients_aggregate_then_derive() {
+    sp_outputs_discoverable_by_recipients_impl(KeyArch::AggregateThenDerive);
+}
+
+#[test]
+fn sp_outputs_discoverable_by_recipients_derive_then_aggregate() {
+    sp_outputs_discoverable_by_recipients_impl(KeyArch::DeriveThenAggregate);
+}
+
+fn rejects_incomplete_musig2_contributor_set_impl(arch: KeyArch) {
     let secp = Secp256k1::new();
-    let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX).expect("key setup");
+    let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX, arch).expect("key setup");
     let recipients = vec![(keys.sp_address.clone(), Amount::from_sat(1_000))];
     let mut psbt = workflow::construct_psbt(&keys, &recipients).expect("construct");
     let scan = keys.sp_address.get_scan_key();
@@ -148,9 +157,18 @@ fn rejects_incomplete_musig2_contributor_set() {
 }
 
 #[test]
-fn rejects_invalid_participant_dleq_proof() {
+fn rejects_incomplete_musig2_contributor_set_aggregate_then_derive() {
+    rejects_incomplete_musig2_contributor_set_impl(KeyArch::AggregateThenDerive);
+}
+
+#[test]
+fn rejects_incomplete_musig2_contributor_set_derive_then_aggregate() {
+    rejects_incomplete_musig2_contributor_set_impl(KeyArch::DeriveThenAggregate);
+}
+
+fn rejects_invalid_participant_dleq_proof_impl(arch: KeyArch) {
     let secp = Secp256k1::new();
-    let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX).expect("key setup");
+    let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX, arch).expect("key setup");
     let recipients = vec![(keys.sp_address.clone(), Amount::from_sat(1_000))];
     let mut psbt = workflow::construct_psbt(&keys, &recipients).expect("construct");
     let scan = keys.sp_address.get_scan_key();
@@ -164,7 +182,7 @@ fn rejects_invalid_participant_dleq_proof() {
     }
 
     let (_, proof) = psbt.inputs[0]
-        .musig2_partial_dleq_proofs
+        .sp_partial_dleq_proofs
         .iter_mut()
         .next()
         .expect("DLEQ proof");
@@ -174,9 +192,18 @@ fn rejects_invalid_participant_dleq_proof() {
 }
 
 #[test]
-fn repeated_scan_key_uses_distinct_output_indices() {
+fn rejects_invalid_participant_dleq_proof_aggregate_then_derive() {
+    rejects_invalid_participant_dleq_proof_impl(KeyArch::AggregateThenDerive);
+}
+
+#[test]
+fn rejects_invalid_participant_dleq_proof_derive_then_aggregate() {
+    rejects_invalid_participant_dleq_proof_impl(KeyArch::DeriveThenAggregate);
+}
+
+fn repeated_scan_key_uses_distinct_output_indices_impl(arch: KeyArch) {
     let secp = Secp256k1::new();
-    let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX).expect("key setup");
+    let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX, arch).expect("key setup");
     let recipients = vec![
         (keys.sp_address.clone(), Amount::from_sat(1_000)),
         (keys.sp_address.clone(), Amount::from_sat(2_000)),
@@ -201,4 +228,14 @@ fn repeated_scan_key_uses_distinct_output_indices() {
         .collect();
     assert_eq!(scripts.len(), 2);
     assert_ne!(scripts[0], scripts[1]);
+}
+
+#[test]
+fn repeated_scan_key_uses_distinct_output_indices_aggregate_then_derive() {
+    repeated_scan_key_uses_distinct_output_indices_impl(KeyArch::AggregateThenDerive);
+}
+
+#[test]
+fn repeated_scan_key_uses_distinct_output_indices_derive_then_aggregate() {
+    repeated_scan_key_uses_distinct_output_indices_impl(KeyArch::DeriveThenAggregate);
 }

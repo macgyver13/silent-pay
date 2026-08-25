@@ -105,7 +105,13 @@ pub fn build_payroll(config: BuildPayrollConfig) -> Result<BuildPayrollResult> {
         .with_context(|| format!("failed to create {}", config.out_dir.display()))?;
 
     let secp = Secp256k1::new();
-    let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX)?;
+    // build_payroll backs `just payroll`; keep it on the architecture the signet
+    // fixtures and firmware interop were produced with.
+    let keys = workflow::setup_keys(
+        &secp,
+        workflow::DEMO_SP_INDEX,
+        workflow::KeyArch::AggregateThenDerive,
+    )?;
     let recipients = load_recipients(&config.recipients_path)?;
     let recipient_pairs = address_amounts(&recipients);
 

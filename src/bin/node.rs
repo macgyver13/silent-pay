@@ -187,16 +187,7 @@ mod tests {
 
     const TEST_WALLET_TOML: &str = r#"
 network = "testnet"
-
-[[signers]]
-xfp = "0f056943"
-derivation_path = "m/48h/1h/0h/3h"
-xpub = "tpubDF2rnouQaaYrY6CUWTapYkeFEs3h3qrzL4M52ZGoPeU9dkarJMtrw6VF1zJRGuGuAFxYS3kXtavfAwQPTQkU5dyNYpbgxcpftrR8H3U85Ez"
-
-[[signers]]
-xfp = "6ba6cfd0"
-derivation_path = "m/48h/1h/0h/3h"
-xpub = "tpubDFcrvj5n7gyazzxdg9k6uvzQsoQWow1xbksr7EvKPRBgUbwCdqu2qxyTJjYFNJ7MQLfdXSJV4n8xPZGtrvwQtEbktinC4EP3k8JN2hcBtz4"
+descriptor = "tr(musig([0f056943/48h/1h/0h/3h]tpubDF2rnouQaaYrY6CUWTapYkeFEs3h3qrzL4M52ZGoPeU9dkarJMtrw6VF1zJRGuGuAFxYS3kXtavfAwQPTQkU5dyNYpbgxcpftrR8H3U85Ez,[6ba6cfd0/48h/1h/0h/3h]tpubDFcrvj5n7gyazzxdg9k6uvzQsoQWow1xbksr7EvKPRBgUbwCdqu2qxyTJjYFNJ7MQLfdXSJV4n8xPZGtrvwQtEbktinC4EP3k8JN2hcBtz4)/<0;1>/*)"
 "#;
 
     #[test]
