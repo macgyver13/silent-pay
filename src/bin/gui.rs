@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use silent_pay::{
     build_initial_payroll_psbt, derive_treasury_script_pubkey, finalize_payroll, load_recipients,
     load_wallet, save_recipients, save_wallet, BuildInitialPayrollConfig, PayrollRecipient,
-    RecipientEntry, TreasuryPrevout, TreasurySigner, TreasuryWalletConfig, CHANGE_CHAIN,
-    RECEIVE_CHAIN,
+    RecipientEntry, TreasuryPrevout, TreasurySigner, TreasuryWalletConfig, WalletKeyArch,
+    CHANGE_CHAIN, RECEIVE_CHAIN,
 };
 use silentpayments::Network as SpNetwork;
 use slint::{
@@ -158,7 +158,7 @@ fn load_wallet_into_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     ui.set_wallet_network(wallet.network.into());
     ui.set_last_derivation_index(wallet.last_derivation_index.to_string().into());
     ui.set_change_derivation_index(wallet.change_derivation_index.to_string().into());
-    ui.set_descriptor(wallet.descriptor.unwrap_or_default().into());
+    ui.set_descriptor(wallet.descriptor.into());
     ui.set_signer_rows(signer_rows(&wallet.signers));
     update_receive_address(&ui)?;
     Ok("Loaded wallet".to_string())
@@ -177,7 +177,7 @@ fn save_wallet_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String> {
     save_wallet(&path, &wallet)?;
     save_app_config_from_ui(&ui)?;
     let wallet = load_wallet(&path)?;
-    ui.set_descriptor(wallet.descriptor.unwrap_or_default().into());
+    ui.set_descriptor(wallet.descriptor.into());
     ui.set_signer_rows(signer_rows(&wallet.signers));
     update_receive_address(&ui)?;
     Ok("Saved wallet".to_string())
@@ -925,9 +925,9 @@ enum UtxoStatus {
 
 fn wallet_from_ui(ui: &PayrollGui) -> Result<TreasuryWalletConfig> {
     let descriptor = blank_to_none(ui.get_descriptor().as_str());
-    if descriptor.is_none() {
+    let Some(descriptor) = descriptor else {
         bail!("descriptor is required");
-    }
+    };
     Ok(TreasuryWalletConfig {
         network: ui.get_wallet_network().to_string(),
         descriptor,
@@ -939,7 +939,10 @@ fn wallet_from_ui(ui: &PayrollGui) -> Result<TreasuryWalletConfig> {
             ui.get_change_derivation_index().as_str(),
             "change derivation index",
         )?,
+        // Discarded and recomputed from `descriptor` by `normalized()`, called
+        // inside `save_wallet` before this value is ever read.
         signers: Vec::new(),
+        key_arch: WalletKeyArch::default(),
     })
 }
 

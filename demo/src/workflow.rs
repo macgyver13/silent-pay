@@ -29,6 +29,24 @@ fn sp_v0_info_bytes(address: &SilentPaymentAddress) -> [u8; 66] {
     bytes
 }
 
+/// How the per-index MuSig2 aggregate key is produced. Mirrors
+/// `psbt::musig2::keyagg::AggregationMode`; kept as a separate demo-local type so
+/// this crate does not need to depend on that module's private plumbing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyArch {
+    /// BIP-328 synthetic derivation: aggregate the account-level participant keys,
+    /// then derive the aggregate along `[0, sub_index]`. Matches the COLDCARD/Jade
+    /// firmware and the signet interop demonstration -- the participant secret is
+    /// account-level and never re-derived, so a partial ECDH share for a given
+    /// scan key is identical at every index.
+    AggregateThenDerive,
+    /// BIP-390 ranged participants: derive each participant along
+    /// `[0, sub_index]` first, then aggregate. Not exercised by any firmware yet --
+    /// proof of concept only. The participant secret is a per-index child, so a
+    /// partial ECDH share for a given scan key differs at every index.
+    DeriveThenAggregate,
+}
+
 /// Static key material for the demo.
 pub struct KeySetup {
     pub alice_sk: SecretKey,
@@ -37,10 +55,16 @@ pub struct KeySetup {
     pub alice_pk: PublicKey,
     pub bob_pk: PublicKey,
     pub charlie_pk: PublicKey,
-    /// Pre-tweak aggregate pubkey — used as PSBT_IN/OUT_MUSIG2_PARTICIPANT_PUBKEYS keydata
-    /// per BIP-373: "computed as specified in BIP-327 with no tweaks applied".
+    /// Pre-taproot-tweak aggregate pubkey — used as
+    /// PSBT_IN/OUT_MUSIG2_PARTICIPANT_PUBKEYS keydata per BIP-373: "computed as
+    /// specified in BIP-327 with no tweaks applied". Under `AggregateThenDerive`
+    /// this is the bare aggregate of the account-level participants (before the
+    /// BIP-328 derivation); under `DeriveThenAggregate` there is no separate
+    /// account-level stage, so this is the bare aggregate of the already-derived
+    /// participants.
     pub untweaked_agg_pk: PublicKey,
-    /// Pre-tweak aggregate xonly — used in TAP_BIP32_DERIVATION entries.
+    /// Pre-taproot-tweak aggregate xonly — used in TAP_BIP32_DERIVATION entries
+    /// and as the taproot internal key.
     pub untweaked_agg_xonly: bitcoin::key::XOnlyPublicKey,
     /// Post-tweak (taproot) aggregate pubkey — used for the P2TR scriptPubKey.
     pub agg_pk: PublicKey,
@@ -50,21 +74,33 @@ pub struct KeySetup {
     pub scan_pk: PublicKey,
     pub scan_sk: SecretKey,
     pub sp_address: SilentPaymentAddress,
+    /// Which key architecture produced this key material. `construct_psbt` reads
+    /// this to decide whether to record a synthetic aggregate-derivation origin
+    /// (`AggregateThenDerive`) or omit it (`DeriveThenAggregate`) -- see
+    /// rust-psbt's `musig2_agg_path` doc comment for why the absence must be
+    /// meaningful rather than defaulted.
+    pub key_arch: KeyArch,
 }
 
-/// Synthetic `/0/*` leaf index used by the demo fixtures. The aggregate key,
-/// scriptPubKey, and the PSBT TAP_BIP32_DERIVATION path all derive from this, so
-/// build_payroll and finalize_payroll share this one source of truth to stay in
+/// Index used by the demo fixtures for whichever derivation `KeyArch` implies:
+/// under `AggregateThenDerive` it is the synthetic `/0/*` leaf on the aggregate
+/// key; under `DeriveThenAggregate` it is each participant's own `/0/*` leaf. The
+/// aggregate key, scriptPubKey, and PSBT derivation metadata all derive from this,
+/// so build_payroll and finalize_payroll share this one source of truth to stay in
 /// sync. Change this to regenerate fixtures at a different index.
 pub const DEMO_SP_INDEX: u32 = 3;
 
 /// Generate deterministic demo key material and aggregate the MuSig2 key.
 ///
-/// `sub_index` is the synthetic `/0/*` leaf index (BIP-328 derivation on the
-/// aggregate key); the external branch is fixed to `0`.
-pub fn setup_keys(secp: &Secp256k1<secp256k1::All>, sub_index: u32) -> Result<KeySetup> {
+/// `sub_index` is the `/0/*` leaf index; see [`DEMO_SP_INDEX`] and [`KeyArch`] for
+/// which key it is derived on.
+pub fn setup_keys(
+    secp: &Secp256k1<secp256k1::All>,
+    sub_index: u32,
+    arch: KeyArch,
+) -> Result<KeySetup> {
     use bip39::Mnemonic;
-    use bitcoin::bip32::{DerivationPath, Xpriv};
+    use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv};
     use hmac::{Hmac, Mac};
     use sha2::Sha512;
     use std::str::FromStr;
@@ -75,23 +111,41 @@ pub fn setup_keys(secp: &Secp256k1<secp256k1::All>, sub_index: u32) -> Result<Ke
     let mnemonic =
         Mnemonic::parse(mnemonic_str).map_err(|e| anyhow::anyhow!("Mnemonic parse: {e}"))?;
 
-    let path = DerivationPath::from_str("m/48'/1'/0'/3'")
+    let account_path = DerivationPath::from_str("m/48'/1'/0'/3'")
         .map_err(|e| anyhow::anyhow!("Path parse: {e}"))?;
 
-    let alice_sk = {
+    let alice_master = {
         let seed = mnemonic.to_seed("");
-        let master = Xpriv::new_master(bitcoin::Network::Testnet, &seed)?;
-        master.derive_priv(secp, &path)?.private_key
+        Xpriv::new_master(bitcoin::Network::Testnet, &seed)?.derive_priv(secp, &account_path)?
     };
-    let bob_sk = {
+    let bob_master = {
         let seed = mnemonic.to_seed("Me");
-        let master = Xpriv::new_master(bitcoin::Network::Testnet, &seed)?;
-        master.derive_priv(secp, &path)?.private_key
+        Xpriv::new_master(bitcoin::Network::Testnet, &seed)?.derive_priv(secp, &account_path)?
     };
-    let charlie_sk = {
+    let charlie_master = {
         let seed = mnemonic.to_seed("Myself");
-        let master = Xpriv::new_master(bitcoin::Network::Testnet, &seed)?;
-        master.derive_priv(secp, &path)?.private_key
+        Xpriv::new_master(bitcoin::Network::Testnet, &seed)?.derive_priv(secp, &account_path)?
+    };
+
+    // Under AggregateThenDerive the participant secrets stay account-level; the
+    // per-index derivation happens on the aggregate below. Under
+    // DeriveThenAggregate each participant is derived at [0, sub_index] first,
+    // and aggregation applies no further per-index tweak.
+    let (alice_sk, bob_sk, charlie_sk) = match arch {
+        KeyArch::AggregateThenDerive => (
+            alice_master.private_key,
+            bob_master.private_key,
+            charlie_master.private_key,
+        ),
+        KeyArch::DeriveThenAggregate => {
+            let index_path: DerivationPath =
+                [0u32, sub_index].iter().map(|&n| ChildNumber::from(n)).collect();
+            (
+                alice_master.derive_priv(secp, &index_path)?.private_key,
+                bob_master.derive_priv(secp, &index_path)?.private_key,
+                charlie_master.derive_priv(secp, &index_path)?.private_key,
+            )
+        }
     };
 
     let alice_pk = PublicKey::from_secret_key(secp, &alice_sk);
@@ -113,58 +167,73 @@ pub fn setup_keys(secp: &Secp256k1<secp256k1::All>, sub_index: u32) -> Result<Ke
     let p_base: musig2::secp256k1::PublicKey = key_agg_ctx.aggregated_pubkey();
     let p_base_bitcoin = PublicKey::from_slice(&p_base.serialize())?;
 
-    // Pre-tweak aggregate pubkey of MuSig2 aggregate session
+    // Bare (pre-taproot-tweak) aggregate pubkey. Under AggregateThenDerive this is
+    // the account-level aggregate, still needing the BIP-328 layer below. Under
+    // DeriveThenAggregate the participants are already per-index, so this value
+    // needs no further plain tweak.
     let untweaked_agg_pk = p_base_bitcoin;
 
-    // BIP-328 synthetic xpub chaincode (SHA256 of "MuSig2MuSig2MuSig2")
-    let mut current_chaincode =
-        hex::decode("868087ca02a6f974c4598924c36b57762d32cb45717167e300622c7167e38965")
-            .map_err(|e| anyhow::anyhow!("Chaincode decode: {e}"))?;
-    let mut current_pk = p_base_bitcoin;
+    let (key_agg_ctx, untweaked_agg_xonly) = match arch {
+        KeyArch::AggregateThenDerive => {
+            // BIP-328 synthetic xpub chaincode (SHA256 of "MuSig2MuSig2MuSig2")
+            let mut current_chaincode =
+                hex::decode("868087ca02a6f974c4598924c36b57762d32cb45717167e300622c7167e38965")
+                    .map_err(|e| anyhow::anyhow!("Chaincode decode: {e}"))?;
+            let mut current_pk = p_base_bitcoin;
 
-    let derivation_indices = [0u32, sub_index];
-    let mut tweaks = Vec::new();
+            let derivation_indices = [0u32, sub_index];
+            let mut tweaks = Vec::new();
 
-    for index in derivation_indices {
-        let mut data = Vec::new();
-        data.extend_from_slice(&current_pk.serialize());
-        data.extend_from_slice(&index.to_be_bytes());
+            for index in derivation_indices {
+                let mut data = Vec::new();
+                data.extend_from_slice(&current_pk.serialize());
+                data.extend_from_slice(&index.to_be_bytes());
 
-        let mut mac = HmacSha512::new_from_slice(&current_chaincode)
-            .map_err(|e| anyhow::anyhow!("HMAC init: {e}"))?;
-        mac.update(&data);
-        let result = mac.finalize().into_bytes();
+                let mut mac = HmacSha512::new_from_slice(&current_chaincode)
+                    .map_err(|e| anyhow::anyhow!("HMAC init: {e}"))?;
+                mac.update(&data);
+                let result = mac.finalize().into_bytes();
 
-        let il = &result[0..32];
-        let ir = &result[32..64];
+                let il = &result[0..32];
+                let ir = &result[32..64];
 
-        let scalar = secp256k1::Scalar::from_be_bytes(il.try_into()?)
-            .map_err(|e| anyhow::anyhow!("Scalar from BE: {e}"))?;
-        tweaks.push(il.to_vec());
+                let scalar = secp256k1::Scalar::from_be_bytes(il.try_into()?)
+                    .map_err(|e| anyhow::anyhow!("Scalar from BE: {e}"))?;
+                tweaks.push(il.to_vec());
 
-        current_pk = current_pk
-            .add_exp_tweak(secp, &scalar)
-            .map_err(|e| anyhow::anyhow!("Add exp tweak: {e}"))?;
-        current_chaincode = ir.to_vec();
-    }
+                current_pk = current_pk
+                    .add_exp_tweak(secp, &scalar)
+                    .map_err(|e| anyhow::anyhow!("Add exp tweak: {e}"))?;
+                current_chaincode = ir.to_vec();
+            }
 
-    // Tweak the KeyAggContext with derived plain tweaks
-    let mut key_agg_ctx = key_agg_ctx;
-    for tweak in &tweaks {
-        let tweak_arr: [u8; 32] = tweak.as_slice().try_into()?;
-        let musig_scalar = musig2::secp256k1::Scalar::from_be_bytes(tweak_arr)
-            .map_err(|e| anyhow::anyhow!("MuSig Scalar from BE: {e}"))?;
-        key_agg_ctx = key_agg_ctx
-            .with_plain_tweak(musig_scalar)
-            .map_err(|e| anyhow::anyhow!("With plain tweak: {e}"))?;
-    }
+            // Tweak the KeyAggContext with derived plain tweaks
+            let mut key_agg_ctx = key_agg_ctx;
+            for tweak in &tweaks {
+                let tweak_arr: [u8; 32] = tweak.as_slice().try_into()?;
+                let musig_scalar = musig2::secp256k1::Scalar::from_be_bytes(tweak_arr)
+                    .map_err(|e| anyhow::anyhow!("MuSig Scalar from BE: {e}"))?;
+                key_agg_ctx = key_agg_ctx
+                    .with_plain_tweak(musig_scalar)
+                    .map_err(|e| anyhow::anyhow!("With plain tweak: {e}"))?;
+            }
 
-    let tweaked_agg_pk_031: musig2::secp256k1::PublicKey = key_agg_ctx.aggregated_pubkey();
-    let tweaked_agg_pk_bitcoin = PublicKey::from_slice(&tweaked_agg_pk_031.serialize())?;
-    assert_eq!(current_pk, tweaked_agg_pk_bitcoin);
+            let tweaked_agg_pk_031: musig2::secp256k1::PublicKey = key_agg_ctx.aggregated_pubkey();
+            let tweaked_agg_pk_bitcoin = PublicKey::from_slice(&tweaked_agg_pk_031.serialize())?;
+            assert_eq!(current_pk, tweaked_agg_pk_bitcoin);
 
-    // untweaked_agg_xonly is the x-only of the derived child key (/0/<sub_index>) before taproot tweak
-    let (untweaked_agg_xonly, _) = current_pk.x_only_public_key();
+            // untweaked_agg_xonly is the x-only of the derived child key (/0/<sub_index>) before taproot tweak
+            let (untweaked_agg_xonly, _) = current_pk.x_only_public_key();
+            (key_agg_ctx, untweaked_agg_xonly)
+        }
+        KeyArch::DeriveThenAggregate => {
+            // Participants are already the per-index children; there is no
+            // BIP-328 layer, so the bare aggregate computed above is also the
+            // pre-taproot-tweak internal key.
+            let (untweaked_agg_xonly, _) = p_base_bitcoin.x_only_public_key();
+            (key_agg_ctx, untweaked_agg_xonly)
+        }
+    };
 
     // Apply BIP-341 taproot tweak (no script tree => unspendable taproot tweak).
     let key_agg_ctx = key_agg_ctx
@@ -206,6 +275,7 @@ pub fn setup_keys(secp: &Secp256k1<secp256k1::All>, sub_index: u32) -> Result<Ke
         scan_pk,
         scan_sk,
         sp_address,
+        key_arch: arch,
     })
 }
 
@@ -232,7 +302,7 @@ pub fn construct_psbt(
                 value: *amount,
                 script_pubkey: ScriptBuf::new(),
             });
-            o.sp_v0_info = Some(sp_v0_info_bytes(addr));
+            o.sp_v0_info = Some(sp_v0_info_bytes(addr).into());
             o
         })
         .collect();
@@ -255,15 +325,22 @@ pub fn construct_psbt(
         &keys.untweaked_agg_pk,
         &[keys.alice_pk, keys.bob_pk, keys.charlie_pk],
     );
-    // The aggregate MuSig2 key's [0, DEMO_SP_INDEX] child-derivation path is stored
-    // as a TAP_BIP32_DERIVATION entry (BIP-373), not the BIP-376 SP-spend field.
-    // The finalizer reads it back to re-derive the aggregate child for ECDH.
-    psbt.inputs[0].set_musig2_agg_derivation(
-        &keys.untweaked_agg_pk,
-        keys.untweaked_agg_xonly,
-        0,
-        DEMO_SP_INDEX,
-    );
+    if keys.key_arch == KeyArch::AggregateThenDerive {
+        // The aggregate MuSig2 key's [0, DEMO_SP_INDEX] child-derivation path is
+        // stored as a TAP_BIP32_DERIVATION entry (BIP-373), not the BIP-376
+        // SP-spend field. The finalizer reads it back to re-derive the aggregate
+        // child for ECDH. Under DeriveThenAggregate there is no synthetic
+        // derivation to record: the aggregate is built directly from the already-
+        // derived participants, so this entry must be absent -- see rust-psbt's
+        // `musig2_agg_path` doc comment for why the combiner must not default a
+        // missing entry to [0, 0].
+        psbt.inputs[0].set_musig2_agg_derivation(
+            &keys.untweaked_agg_pk,
+            keys.untweaked_agg_xonly,
+            0,
+            DEMO_SP_INDEX,
+        );
+    }
 
     // BIP-373: tag the change output (the non-SP output) with the participant
     // pubkeys to aid change detection.
@@ -316,7 +393,7 @@ pub fn add_ecdh_share(
         share: partial_share,
         dleq_proof: to_psbt_dleq(dleq_proof),
     };
-    psbt.inputs[0].add_musig2_partial_ecdh_share(&partial);
+    psbt.inputs[0].add_sp_partial_ecdh_share(&partial);
 
     Ok(())
 }
