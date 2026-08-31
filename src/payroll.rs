@@ -4,7 +4,7 @@ use bitcoin::key::{TweakedPublicKey, XOnlyPublicKey};
 use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, Txid};
 use hmac::{Hmac, Mac};
 use psbt::Psbt;
-use psbt_v2::v2::Output;
+use psbt_v2::Output;
 use secp256k1::{PublicKey, Secp256k1};
 use sha2::Sha512;
 use silentpayments::Network as SpNetwork;
@@ -544,7 +544,7 @@ mod tests {
         assert_eq!(*agg_path, DerivationPath::from_str("m/0/0").expect("path"));
         assert_eq!(
             *agg_fp,
-            psbt_v2::v2::musig2_agg_fingerprint(&input_keys.untweaked_agg_pk)
+            psbt_v2::musig2_agg_fingerprint(&input_keys.untweaked_agg_pk)
         );
         assert!(psbt.inputs[0].sp_spend_bip32_derivations.is_empty());
 
