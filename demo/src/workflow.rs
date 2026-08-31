@@ -16,7 +16,7 @@ use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 
 use psbt::core::utils::to_psbt_dleq;
 use psbt::{generate_dleq_proof, verify_dleq_proof, Psbt};
-use psbt_v2::v2::{Output, PartialEcdhShareData};
+use psbt_v2::{Output, PartialEcdhShareData};
 
 use psbt::musig2::{build_psbt, finalize_sp_outputs};
 use psbt::roles::musig2_signer as signing;

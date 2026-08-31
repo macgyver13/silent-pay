@@ -3,8 +3,8 @@ use bitcoin::bip32::{DerivationPath, Fingerprint};
 use bitcoin::key::{TweakedPublicKey, XOnlyPublicKey};
 use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, Txid};
 use hmac::{Hmac, Mac};
-use psbt::Psbt;
-use psbt_v2::v2::Output;
+use psbt::{core::utils::to_sp_v0_info, Psbt};
+use psbt_v2::Output;
 use secp256k1::{PublicKey, Secp256k1};
 use sha2::Sha512;
 use silentpayments::Network as SpNetwork;
@@ -236,7 +236,7 @@ fn construct_initial_psbt(
                 value: *amount,
                 script_pubkey: ScriptBuf::new(),
             });
-            output.sp_v0_info = Some(sp_v0_info_bytes(address));
+            output.sp_v0_info = Some(to_sp_v0_info(address));
             output
         })
         .collect();
@@ -304,13 +304,6 @@ fn validate_recipient_networks(
         }
     }
     Ok(())
-}
-
-fn sp_v0_info_bytes(address: &silentpayments::SilentPaymentAddress) -> [u8; 66] {
-    let mut bytes = [0u8; 66];
-    bytes[..33].copy_from_slice(&address.get_scan_key().serialize());
-    bytes[33..].copy_from_slice(&address.get_spend_key().serialize());
-    bytes
 }
 
 fn apply_bip328_plain_tweaks(
@@ -544,7 +537,7 @@ mod tests {
         assert_eq!(*agg_path, DerivationPath::from_str("m/0/0").expect("path"));
         assert_eq!(
             *agg_fp,
-            psbt_v2::v2::musig2_agg_fingerprint(&input_keys.untweaked_agg_pk)
+            psbt_v2::musig2_agg_fingerprint(&input_keys.untweaked_agg_pk)
         );
         assert!(psbt.inputs[0].sp_spend_bip32_derivations.is_empty());
 
