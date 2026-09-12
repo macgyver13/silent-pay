@@ -125,6 +125,45 @@ receiver-side validation, not production payouts.
 | `just scan`    | `cc_sp_out/musig2-sp-final.psbt`, `demo/recipients.toml` | detected recipient outputs             |
 | `just verify`  | `cc_sp_out/musig2-sp-final.psbt`   | receipt verification for one recipient             |
 
+## Regtest/signet round trip
+
+`just payroll` builds from a static fixture prevout, and `just finalize`/`scan`/
+`verify` never touch a live node -- useful for fast, deterministic hardware
+bring-up, but not proof a payment actually lands on-chain and is detectable by
+a real wallet. The round-trip recipes below use a real, funded treasury UTXO
+and a real Bitcoin Core node instead.
+
+`sp-demo`'s `live` module never synthesizes signer contributions -- signing
+still happens the same way as the fixture workflow above (hardware handoff, or
+another coordinator such as `bip375-interop`).
+
+1. **Set up a wallet file** — a `TreasuryWalletConfig` TOML pointed at a
+   `regtest` or `signet` network (see the GUI's Treasury wallet screen for the
+   format). Point the `regtest_wallet` justfile variable at it.
+2. **Fund** — `just fund-regtest` mines and matures a treasury deposit
+   (regtest only; self-funding isn't possible on signet -- fund the wallet's
+   receive address externally first, e.g. from your own signet wallet).
+3. **Build round 1** — `just round1` finds the funded UTXO (auto-funding it on
+   regtest, scanning for it on signet) and writes a real round-1 PSBT plus
+   descriptor to `regtest_out`, exactly like `just payroll` but from a real
+   prevout.
+4. **Sign** — hand the descriptor + PSBT to the signers, same as step 2 of the
+   demo workflow above.
+5. **Finalize** — `just finalize` (existing recipe; point `cc_sp_out` at
+   `regtest_out` or reuse the recipe with an explicit path).
+6. **Broadcast** — `just broadcast` sends the finalized transaction to the
+   node; on regtest it also mines the confirmation block.
+7. **Verify on-chain** — `just verify-onchain <txid>` re-runs the BIP-352 scan
+   from `just scan` and additionally confirms via `gettxout` that each
+   detected output actually exists, unspent, on the node -- proof the
+   recipient's wallet would actually see and could spend it, not only that the
+   PSBT math says so.
+
+This still uses silent-pay's own scan math for detection; it is not an
+independent third-party verification (a separate scanner such as BlindBit, or
+manual receipt in a wallet like Sparrow, would be). That's a deliberately
+deferred follow-up, not part of this round trip.
+
 ## recipients.toml reference
 
 Each recipient is a `[[recipients]]` record:

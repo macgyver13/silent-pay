@@ -1,19 +1,32 @@
-//! Bitcoin Core RPC interaction for the payroll GUI: client construction,
-//! transaction broadcast, and the `scantxoutset`-based funding-UTXO scan.
+//! Bitcoin Core RPC interaction: client construction, transaction broadcast,
+//! and the `scantxoutset`-based funding-UTXO scan.
 //!
 //! This module owns all of the `bitcoincore-rpc` surface. The GUI orchestration
-//! (threads, timers, UI state) lives in `gui.rs` and calls into here.
+//! (threads, timers, UI state) lives in `gui.rs` and calls into here; headless
+//! callers (e.g. `sp-demo`) call it directly.
 
 use anyhow::{anyhow, bail, Context, Result};
-use bitcoin::{ScriptBuf, Txid};
+use bitcoin::{Network, ScriptBuf, Txid};
 use bitcoincore_rpc::json::ScanTxOutRequest;
 use bitcoincore_rpc::{Auth, Client, RpcApi};
-use silent_pay::{
-    derive_treasury_script_pubkey, TreasuryWalletConfig, CHANGE_CHAIN, RECEIVE_CHAIN,
-};
+use crate::{derive_treasury_script_pubkey, TreasuryWalletConfig, CHANGE_CHAIN, RECEIVE_CHAIN};
+use silentpayments::Network as SpNetwork;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// Map the wallet's Silent Payment network to the `bitcoin` network Core's RPC
+/// expects. `SpNetwork` has no signet variant of its own (signet addresses use
+/// the same `tsp1…` testnet encoding as regtest/testnet); callers that need to
+/// distinguish signet from regtest/testnet3 must do so from the wallet's raw
+/// `network` string, not from this mapping.
+pub fn bitcoin_network(network: SpNetwork) -> Network {
+    match network {
+        SpNetwork::Mainnet => Network::Bitcoin,
+        SpNetwork::Testnet => Network::Testnet,
+        SpNetwork::Regtest => Network::Regtest,
+    }
+}
 
 /// How many indexes past the wallet's highest known index the funding scan
 /// covers, on each of the receive and change chains.
@@ -183,7 +196,7 @@ fn is_scan_in_progress(err: &bitcoincore_rpc::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use silent_pay::parse_wallet;
+    use crate::parse_wallet;
 
     const TEST_WALLET_TOML: &str = r#"
 network = "testnet"

@@ -1,16 +1,15 @@
 use anyhow::{anyhow, bail, Context, Result};
-use bitcoin::{Address, Amount, Network, Transaction, Txid};
+use bitcoin::{Address, Amount, Transaction, Txid};
 use chrono::{Local, NaiveDate};
 use copypasta::{ClipboardContext, ClipboardProvider};
 use psbt::Psbt as SilentPaymentPsbt;
 use serde::{Deserialize, Serialize};
 use silent_pay::{
     build_initial_payroll_psbt, derive_treasury_script_pubkey, finalize_payroll, load_recipients,
-    load_wallet, save_recipients, save_wallet, BuildInitialPayrollConfig, PayrollRecipient,
+    load_wallet, node, save_recipients, save_wallet, BuildInitialPayrollConfig, PayrollRecipient,
     RecipientEntry, TreasuryPrevout, TreasurySigner, TreasuryWalletConfig, WalletKeyArch,
     CHANGE_CHAIN, RECEIVE_CHAIN,
 };
-use silentpayments::Network as SpNetwork;
 use slint::{
     ComponentHandle, Model, ModelRc, SharedString, StandardListViewItem, Timer, TimerMode, VecModel,
 };
@@ -22,8 +21,6 @@ use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::mpsc;
 use std::time::Duration;
-
-mod node;
 
 slint::slint! {
     export { PayrollGui } from "payroll_gui.slint";
@@ -991,16 +988,8 @@ fn address_from_script(
     wallet: &TreasuryWalletConfig,
     script: &bitcoin::ScriptBuf,
 ) -> Result<String> {
-    let network = bitcoin_network(wallet.network_value()?);
+    let network = node::bitcoin_network(wallet.network_value()?);
     Ok(Address::from_script(script, network)?.to_string())
-}
-
-fn bitcoin_network(network: SpNetwork) -> Network {
-    match network {
-        SpNetwork::Mainnet => Network::Bitcoin,
-        SpNetwork::Testnet => Network::Testnet,
-        SpNetwork::Regtest => Network::Regtest,
-    }
 }
 
 fn recipient_entries_from_table_rows(
