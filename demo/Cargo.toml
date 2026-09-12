@@ -9,6 +9,7 @@ autobins = false
 anyhow = "1.0"
 bip39 = "2.0"
 bitcoin = "0.32.6"
+bitcoincore-rpc = "0.19.0"
 hex = "0.4"
 hmac = "0.12"
 musig2 = { version = "0.3.1", features = ["secp256k1"] }
@@ -40,3 +41,23 @@ path = "src/bin/verify_receipt.rs"
 [[bin]]
 name = "gen_demo_recipients"
 path = "src/bin/gen_demo_recipients.rs"
+
+[[bin]]
+name = "fund_treasury"
+path = "src/bin/fund_treasury.rs"
+
+[[bin]]
+name = "build_round1"
+path = "src/bin/build_round1.rs"
+
+[[bin]]
+name = "broadcast_final"
+path = "src/bin/broadcast_final.rs"
+
+[[bin]]
+name = "verify_onchain"
+path = "src/bin/verify_onchain.rs"
+
+[[bin]]
+name = "treasury_address"
+path = "src/bin/treasury_address.rs"

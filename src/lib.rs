@@ -1,4 +1,5 @@
 pub mod finalize;
+pub mod node;
 pub mod payroll;
 pub mod recipients;
 pub mod wallet;
