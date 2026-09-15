@@ -9,28 +9,33 @@ edition = "2021"
 license = "MIT"
 autobins = false
 
+[features]
+default = ["gui"]
+gui = ["dep:slint", "dep:copypasta", "dep:rfd"]
+
 [dependencies]
 anyhow = "1.0"
 bitcoincore-rpc = "0.19.0"
 bitcoin = "0.32.6"
 chrono = "0.4.45"
-copypasta = "0.10.2"
+copypasta = { version = "0.10.2", optional = true }
 hex = "0.4"
 hmac = "0.12"
-psbt = { git = "https://github.com/macgyver13/spdk.git", branch = "musig2-working" }
-psbt-v2 = { git = "https://gitea.bitcoin.ninja/macgyver/rust-psbt.git", branch = "musig2-working", features = ["miniscript", "musig2", "silent-payments"] }
-rfd = "0.15.4"
+psbt = { git = "https://github.com/macgyver13/spdk.git", rev = "5c8a3823d0addf6f481f81f86cb3f58604cab5d4" }
+psbt-v2 = { git = "https://gitea.bitcoin.ninja/macgyver/rust-psbt.git", rev = "917cb032337f77ef2e98f80b3552f3af7d0486ca", features = ["miniscript", "musig2", "silent-payments"] }
+rfd = { version = "0.15.4", optional = true }
 secp256k1 = { version = "0.29", features = ["rand", "global-context", "serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-slint = "1.16.1"
-silentpayments = { git = "https://github.com/macgyver13/spdk.git", branch = "musig2-working" }
+slint = { version = "1.16.1", optional = true }
+silentpayments = { git = "https://github.com/macgyver13/spdk.git", rev = "5c8a3823d0addf6f481f81f86cb3f58604cab5d4" }
 toml = "0.9.12"
 
 [[bin]]
 name = "silent-pay"
 path = "src/bin/gui.rs"
+required-features = ["gui"]
 
 [package.metadata.bundle]
 name = "SilentPay"

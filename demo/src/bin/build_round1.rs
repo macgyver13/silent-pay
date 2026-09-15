@@ -1,5 +1,5 @@
-//! Real-network counterpart to `payroll`: builds the round-1 PSBT and
-//! descriptor from an actual funded treasury UTXO on regtest or signet,
+//! Real-network counterpart to `payroll`: builds the initial, unsigned PSBT
+//! and descriptor from an actual funded treasury UTXO on regtest or signet,
 //! instead of the demo's static fixture prevout. No signer contributions are
 //! added here -- the resulting PSBT + descriptor is the artifact handed off
 //! for real signer rounds (e.g. via `bip375-interop`).
@@ -41,7 +41,7 @@ fn main() -> Result<()> {
 
     fs::create_dir_all(&args.out_dir)
         .with_context(|| format!("failed to create {}", args.out_dir.display()))?;
-    let psbt_path = args.out_dir.join("round1.psbt");
+    let psbt_path = args.out_dir.join("initial.psbt");
     let mut config = BuildInitialPayrollConfig::new(
         wallet,
         &args.recipients_path,
