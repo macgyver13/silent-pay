@@ -13,13 +13,13 @@ bitcoincore-rpc = "0.19.0"
 hex = "0.4"
 hmac = "0.12"
 musig2 = { version = "0.3.1", features = ["secp256k1"] }
-psbt = { git = "https://github.com/macgyver13/spdk.git", branch = "musig2-working" }
-psbt-v2 = { git = "https://gitea.bitcoin.ninja/macgyver/rust-psbt.git", branch = "musig2-working", features = ["miniscript", "musig2", "silent-payments"] }
+psbt = { git = "https://github.com/macgyver13/spdk.git", rev = "5c8a3823d0addf6f481f81f86cb3f58604cab5d4" }
+psbt-v2 = { git = "https://gitea.bitcoin.ninja/macgyver/rust-psbt.git", rev = "917cb032337f77ef2e98f80b3552f3af7d0486ca", features = ["miniscript", "musig2", "silent-payments"] }
 secp256k1 = { version = "0.29", features = ["rand", "global-context", "serde"] }
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
-silent-pay = { path = ".." }
-silentpayments = { git = "https://github.com/macgyver13/spdk.git", branch = "musig2-working" }
+silent-pay = { path = "..", default-features = false }
+silentpayments = { git = "https://github.com/macgyver13/spdk.git", rev = "5c8a3823d0addf6f481f81f86cb3f58604cab5d4" }
 toml = "0.9.12"
 
 [[bin]]
