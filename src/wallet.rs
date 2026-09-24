@@ -7,19 +7,43 @@ use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
+/// How the wallet's MuSig2 aggregate key is derived. Encoded entirely in the shape
+/// of the registered descriptor -- see [`descriptor_from_signers`] and
+/// [`parse_descriptor_signers`] -- so it is never independently settable: the
+/// descriptor is the only source of truth, and this is always recomputed from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WalletKeyArch {
+    /// `tr(musig([xfp/path]xpub,...)/<0;1>/*)`. Aggregates the signers' account-level
+    /// keys, then derives the aggregate (BIP-328 synthetic derivation). Matches the
+    /// COLDCARD/Jade firmware and the signet interop demonstration.
+    #[default]
+    AggregateThenDerive,
+    /// `tr(musig([xfp/path]xpub/<0;1>/*,...))`. Derives each signer's key first
+    /// (BIP-390 ranged participants), then aggregates directly -- no synthetic
+    /// derivation layer. Proof of concept only; no firmware supports it yet.
+    DeriveThenAggregate,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TreasuryWalletConfig {
     #[serde(default = "default_network")]
     pub network: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub descriptor: Option<String>,
+    pub descriptor: String,
     #[serde(default)]
     pub last_derivation_index: u32,
     #[serde(default = "default_change_derivation_index")]
     pub change_derivation_index: u32,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Derived from `descriptor` by [`TreasuryWalletConfig::normalized`]; never an
+    /// input. Empty on a config that has not been normalized yet.
+    #[serde(skip)]
     pub signers: Vec<TreasurySigner>,
+    /// Derived from `descriptor`; see [`WalletKeyArch`]. Defaults to
+    /// `AggregateThenDerive` on a config that has not been normalized yet, since
+    /// that is what an empty descriptor would otherwise parse to.
+    #[serde(skip)]
+    pub key_arch: WalletKeyArch,
 }
+
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TreasurySigner {
@@ -60,7 +84,8 @@ pub fn parse_wallet(contents: &str) -> Result<TreasuryWalletConfig> {
         change_derivation_index: raw
             .change_derivation_index
             .unwrap_or_else(default_change_derivation_index),
-        signers: raw.signers,
+        signers: Vec::new(),
+        key_arch: WalletKeyArch::default(),
     };
     wallet.normalized()
 }
@@ -69,27 +94,21 @@ pub fn parse_wallet(contents: &str) -> Result<TreasuryWalletConfig> {
 struct RawTreasuryWalletConfig {
     #[serde(default = "default_network")]
     network: String,
-    #[serde(default)]
-    descriptor: Option<String>,
+    /// The wallet's only source of truth for its signer set and key architecture
+    /// -- see [`WalletKeyArch`]. There is deliberately no `[[signers]]` input path:
+    /// a raw signer list has no way to express which descriptor form it implies,
+    /// so requiring the descriptor keeps that choice unambiguous.
+    descriptor: String,
     #[serde(default)]
     last_derivation_index: u32,
     #[serde(default)]
     change_derivation_index: Option<u32>,
-    #[serde(default)]
-    signers: Vec<TreasurySigner>,
 }
 
 impl TreasuryWalletConfig {
     pub fn normalized(&self) -> Result<Self> {
         let network = parse_network(&self.network)?;
-        let mut signers = self.signers.clone();
-        if signers.is_empty() {
-            let descriptor = self
-                .descriptor
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("wallet must define signers or descriptor"))?;
-            signers = parse_descriptor_signers(descriptor)?;
-        }
+        let (signers, key_arch) = parse_descriptor_signers(&self.descriptor)?;
         if signers.len() < 2 {
             bail!("N-of-N MuSig2 wallet requires at least two signers");
         }
@@ -98,13 +117,14 @@ impl TreasuryWalletConfig {
                 .validate(network)
                 .with_context(|| format!("signer[{idx}] is invalid"))?;
         }
-        let descriptor = Some(descriptor_from_signers(&signers));
+        let descriptor = descriptor_from_signers(&signers, key_arch);
         Ok(Self {
             network: network_name(network).to_string(),
             descriptor,
             last_derivation_index: self.last_derivation_index,
             change_derivation_index: self.change_derivation_index,
             signers,
+            key_arch,
         })
     }
 
@@ -113,10 +133,7 @@ impl TreasuryWalletConfig {
     }
 
     pub fn descriptor_string(&self) -> Result<String> {
-        Ok(self
-            .normalized()?
-            .descriptor
-            .expect("normalized descriptor"))
+        Ok(self.normalized()?.descriptor)
     }
 }
 
@@ -152,32 +169,76 @@ pub fn parse_network(value: &str) -> Result<SpNetwork> {
     SpNetwork::try_from(value).map_err(|e| anyhow::anyhow!("invalid network {value}: {e}"))
 }
 
-pub fn descriptor_from_signers(signers: &[TreasurySigner]) -> String {
+/// BIP-389 multipath suffix on the receive/change branches: branch 0 is receive,
+/// branch 1 is change, so the change branch is committed to by the registered
+/// descriptor rather than assumed.
+const MULTIPATH_SUFFIX: &str = "/<0;1>/*";
+
+pub fn descriptor_from_signers(signers: &[TreasurySigner], arch: WalletKeyArch) -> String {
     let parts: Vec<String> = signers
         .iter()
         .map(|signer| {
             let path = signer.derivation_path.trim_start_matches("m/");
-            format!("[{}/{}]{}", signer.xfp, path, signer.xpub)
+            let key = format!("[{}/{}]{}", signer.xfp, path, signer.xpub);
+            match arch {
+                WalletKeyArch::AggregateThenDerive => key,
+                // BIP-390: the multipath/wildcard step lives on each participant
+                // instead of on the musig() aggregate.
+                WalletKeyArch::DeriveThenAggregate => format!("{key}{MULTIPATH_SUFFIX}"),
+            }
         })
         .collect();
-    format!("tr(musig({})/0/*)", parts.join(","))
+    match arch {
+        WalletKeyArch::AggregateThenDerive => {
+            format!("tr(musig({}){MULTIPATH_SUFFIX})", parts.join(","))
+        }
+        WalletKeyArch::DeriveThenAggregate => format!("tr(musig({}))", parts.join(",")),
+    }
 }
 
-fn parse_descriptor_signers(descriptor: &str) -> Result<Vec<TreasurySigner>> {
+fn parse_descriptor_signers(descriptor: &str) -> Result<(Vec<TreasurySigner>, WalletKeyArch)> {
     let descriptor = descriptor.trim();
-    let body = descriptor
-        .strip_prefix("tr(musig(")
-        .and_then(|s| s.strip_suffix(")/0/*)"))
-        .ok_or_else(|| {
-            anyhow::anyhow!("descriptor must look like tr(musig([xfp/path]xpub,...)/0/*)")
-        })?;
-    body.split(',')
-        .enumerate()
-        .map(|(idx, part)| parse_descriptor_signer(idx, part.trim()))
-        .collect()
+    let malformed = || {
+        anyhow::anyhow!(
+            "descriptor must look like tr(musig([xfp/path]xpub,...)/<0;1>/*)              or tr(musig([xfp/path]xpub/<0;1>/*,...))"
+        )
+    };
+    let inner = descriptor.strip_prefix("tr(musig(").ok_or_else(malformed)?;
+
+    // Two shapes distinguished by where the BIP-389 multipath step lives: on the
+    // musig() aggregate (AggregateThenDerive) or on each participant
+    // (DeriveThenAggregate) -- never both, never neither.
+    if let Some(body) = inner.strip_suffix(&format!("){MULTIPATH_SUFFIX})")) {
+        let signers = body
+            .split(',')
+            .enumerate()
+            .map(|(idx, part)| parse_descriptor_signer(idx, part.trim(), false))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((signers, WalletKeyArch::AggregateThenDerive))
+    } else if let Some(body) = inner.strip_suffix("))") {
+        let signers = body
+            .split(',')
+            .enumerate()
+            .map(|(idx, part)| parse_descriptor_signer(idx, part.trim(), true))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((signers, WalletKeyArch::DeriveThenAggregate))
+    } else {
+        Err(malformed())
+    }
 }
 
-fn parse_descriptor_signer(idx: usize, part: &str) -> Result<TreasurySigner> {
+fn parse_descriptor_signer(
+    idx: usize,
+    part: &str,
+    expect_multipath_suffix: bool,
+) -> Result<TreasurySigner> {
+    let part = if expect_multipath_suffix {
+        part.strip_suffix(MULTIPATH_SUFFIX).ok_or_else(|| {
+            anyhow::anyhow!("descriptor signer[{idx}] missing {MULTIPATH_SUFFIX} suffix")
+        })?
+    } else {
+        part
+    };
     let origin_end = part
         .find(']')
         .ok_or_else(|| anyhow::anyhow!("descriptor signer[{idx}] missing ]"))?;
@@ -231,49 +292,57 @@ mod tests {
     const XPUB1: &str = "tpubDF2rnouQaaYrY6CUWTapYkeFEs3h3qrzL4M52ZGoPeU9dkarJMtrw6VF1zJRGuGuAFxYS3kXtavfAwQPTQkU5dyNYpbgxcpftrR8H3U85Ez";
     const XPUB2: &str = "tpubDFcrvj5n7gyazzxdg9k6uvzQsoQWow1xbksr7EvKPRBgUbwCdqu2qxyTJjYFNJ7MQLfdXSJV4n8xPZGtrvwQtEbktinC4EP3k8JN2hcBtz4";
 
+    fn test_signers() -> Vec<TreasurySigner> {
+        vec![
+            TreasurySigner {
+                xfp: "0f056943".to_string(),
+                derivation_path: "m/48h/1h/0h/3h".to_string(),
+                xpub: XPUB1.to_string(),
+            },
+            TreasurySigner {
+                xfp: "6ba6cfd0".to_string(),
+                derivation_path: "m/48h/1h/0h/3h".to_string(),
+                xpub: XPUB2.to_string(),
+            },
+        ]
+    }
+
     #[test]
-    fn parses_signer_rows() {
+    fn parses_aggregate_then_derive_descriptor() {
+        let descriptor = format!(
+            "tr(musig([0f056943/48h/1h/0h/3h]{XPUB1},[6ba6cfd0/48h/1h/0h/3h]{XPUB2})/<0;1>/*)"
+        );
         let wallet = parse_wallet(&format!(
-            r#"
-            network = "testnet"
-
-            [[signers]]
-            xfp = "0f056943"
-            derivation_path = "m/48h/1h/0h/3h"
-            xpub = "{XPUB1}"
-
-            [[signers]]
-            xfp = "6ba6cfd0"
-            derivation_path = "m/48h/1h/0h/3h"
-            xpub = "{XPUB2}"
-            "#
+            "network = \"testnet\"\ndescriptor = \"{descriptor}\"\n"
         ))
         .expect("wallet");
-
         assert_eq!(wallet.signers.len(), 2);
-        assert_eq!(wallet.last_derivation_index, 0);
-        assert_eq!(wallet.change_derivation_index, 0);
-        assert!(wallet.descriptor.unwrap().starts_with("tr(musig("));
+        assert_eq!(wallet.key_arch, WalletKeyArch::AggregateThenDerive);
+    }
+
+    #[test]
+    fn parses_derive_then_aggregate_descriptor() {
+        let descriptor = format!(
+            "tr(musig([0f056943/48h/1h/0h/3h]{XPUB1}/<0;1>/*,[6ba6cfd0/48h/1h/0h/3h]{XPUB2}/<0;1>/*))"
+        );
+        let wallet = parse_wallet(&format!(
+            "network = \"testnet\"\ndescriptor = \"{descriptor}\"\n"
+        ))
+        .expect("wallet");
+        assert_eq!(wallet.signers.len(), 2);
+        assert_eq!(wallet.signers[0].xfp, "0f056943");
+        assert_eq!(wallet.signers[0].derivation_path, "m/48h/1h/0h/3h");
+        assert_eq!(wallet.signers[1].xpub, XPUB2);
+        assert_eq!(wallet.key_arch, WalletKeyArch::DeriveThenAggregate);
     }
 
     #[test]
     fn parses_derivation_indices() {
+        let descriptor = format!(
+            "tr(musig([0f056943/48h/1h/0h/3h]{XPUB1},[6ba6cfd0/48h/1h/0h/3h]{XPUB2})/<0;1>/*)"
+        );
         let wallet = parse_wallet(&format!(
-            r#"
-            network = "testnet"
-            last_derivation_index = 3
-            change_derivation_index = 4
-
-            [[signers]]
-            xfp = "0f056943"
-            derivation_path = "m/48h/1h/0h/3h"
-            xpub = "{XPUB1}"
-
-            [[signers]]
-            xfp = "6ba6cfd0"
-            derivation_path = "m/48h/1h/0h/3h"
-            xpub = "{XPUB2}"
-            "#
+            "network = \"testnet\"\nlast_derivation_index = 3\nchange_derivation_index = 4\ndescriptor = \"{descriptor}\"\n"
         ))
         .expect("wallet");
 
@@ -282,44 +351,72 @@ mod tests {
     }
 
     #[test]
-    fn parses_descriptor() {
+    fn rejects_receive_only_descriptor() {
         let descriptor =
             format!("tr(musig([0f056943/48h/1h/0h/3h]{XPUB1},[6ba6cfd0/48h/1h/0h/3h]{XPUB2})/0/*)");
-        let wallet = parse_wallet(&format!(
+        parse_wallet(&format!(
             "network = \"testnet\"\ndescriptor = \"{descriptor}\"\n"
         ))
-        .expect("wallet");
-        assert_eq!(wallet.signers.len(), 2);
+        .expect_err("receive-only descriptor must be rejected");
+    }
+
+    #[test]
+    fn rejects_descriptor_missing_multipath_suffix_on_one_participant() {
+        // First participant carries the BIP-390 multipath suffix, second does not --
+        // an inconsistent DeriveThenAggregate descriptor that must be rejected
+        // rather than silently misparsed.
+        let descriptor = format!(
+            "tr(musig([0f056943/48h/1h/0h/3h]{XPUB1}/<0;1>/*,[6ba6cfd0/48h/1h/0h/3h]{XPUB2}))"
+        );
+        parse_wallet(&format!(
+            "network = \"testnet\"\ndescriptor = \"{descriptor}\"\n"
+        ))
+        .expect_err("inconsistent per-participant multipath must be rejected");
+    }
+
+    #[test]
+    fn descriptor_round_trips_aggregate_then_derive() {
+        let signers = test_signers();
+        let descriptor = descriptor_from_signers(&signers, WalletKeyArch::AggregateThenDerive);
+        assert!(descriptor.ends_with("/<0;1>/*)"));
+        let (parsed, arch) = parse_descriptor_signers(&descriptor).expect("signers");
+        assert_eq!(arch, WalletKeyArch::AggregateThenDerive);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].xfp, "0f056943");
+        assert_eq!(parsed[0].derivation_path, "m/48h/1h/0h/3h");
+        assert_eq!(parsed[1].xpub, XPUB2);
+    }
+
+    #[test]
+    fn descriptor_round_trips_derive_then_aggregate() {
+        let signers = test_signers();
+        let descriptor = descriptor_from_signers(&signers, WalletKeyArch::DeriveThenAggregate);
+        assert!(!descriptor.ends_with("/<0;1>/*)"));
+        assert!(descriptor.contains("/<0;1>/*,"));
+        let (parsed, arch) = parse_descriptor_signers(&descriptor).expect("signers");
+        assert_eq!(arch, WalletKeyArch::DeriveThenAggregate);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].xfp, "0f056943");
+        assert_eq!(parsed[0].derivation_path, "m/48h/1h/0h/3h");
+        assert_eq!(parsed[1].xpub, XPUB2);
     }
 
     #[test]
     fn rejects_single_signer() {
+        let descriptor = format!("tr(musig([0f056943/48h/1h/0h/3h]{XPUB1})/<0;1>/*)");
         assert!(parse_wallet(&format!(
-            r#"
-            network = "testnet"
-            [[signers]]
-            xfp = "0f056943"
-            derivation_path = "m/48h/1h/0h/3h"
-            xpub = "{XPUB1}"
-            "#
+            "network = \"testnet\"\ndescriptor = \"{descriptor}\"\n"
         ))
         .is_err());
     }
 
     #[test]
     fn rejects_bad_fingerprint() {
+        let descriptor = format!(
+            "tr(musig([bad/48h/1h/0h/3h]{XPUB1},[6ba6cfd0/48h/1h/0h/3h]{XPUB2})/<0;1>/*)"
+        );
         assert!(parse_wallet(&format!(
-            r#"
-            network = "testnet"
-            [[signers]]
-            xfp = "bad"
-            derivation_path = "m/48h/1h/0h/3h"
-            xpub = "{XPUB1}"
-            [[signers]]
-            xfp = "6ba6cfd0"
-            derivation_path = "m/48h/1h/0h/3h"
-            xpub = "{XPUB2}"
-            "#
+            "network = \"testnet\"\ndescriptor = \"{descriptor}\"\n"
         ))
         .is_err());
     }

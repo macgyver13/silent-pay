@@ -1,4 +1,5 @@
 pub mod finalize;
+pub mod node;
 pub mod payroll;
 pub mod recipients;
 pub mod wallet;
@@ -11,4 +12,6 @@ pub use payroll::{
 pub use recipients::{
     load_recipients, save_recipients, PayrollRecipient, RecipientConfig, RecipientEntry,
 };
-pub use wallet::{load_wallet, parse_wallet, save_wallet, TreasurySigner, TreasuryWalletConfig};
+pub use wallet::{
+    load_wallet, parse_wallet, save_wallet, TreasurySigner, TreasuryWalletConfig, WalletKeyArch,
+};

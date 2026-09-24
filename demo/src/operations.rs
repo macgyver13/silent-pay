@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 
 use crate::recipients::load_demo_recipients;
 use crate::workflow::{self, KeySetup};
-use silent_pay::recipients::{address_amounts, load_recipients};
 
 const FIXTURE_PREV_TXID_HEX: &str =
     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
@@ -45,6 +44,7 @@ static COSIGNERS_TEST: [Cosigner; 3] = [
 pub struct BuildPayrollConfig {
     pub recipients_path: PathBuf,
     pub out_dir: PathBuf,
+    pub key_arch: workflow::KeyArch,
 }
 
 #[derive(Debug, Clone)]
@@ -105,9 +105,17 @@ pub fn build_payroll(config: BuildPayrollConfig) -> Result<BuildPayrollResult> {
         .with_context(|| format!("failed to create {}", config.out_dir.display()))?;
 
     let secp = Secp256k1::new();
-    let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX)?;
-    let recipients = load_recipients(&config.recipients_path)?;
-    let recipient_pairs = address_amounts(&recipients);
+    // build_payroll backs `just payroll`, which defaults to the architecture the
+    // signet fixtures and firmware interop were produced with.
+    let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX, config.key_arch)?;
+    let recipients = load_demo_recipients(&config.recipients_path)?;
+    let recipient_count = recipients.len();
+    // Deliberately discard receiver-only scan keys and retain only the public
+    // sender view needed for payroll construction.
+    let recipient_pairs: Vec<_> = recipients
+        .into_iter()
+        .map(|recipient| (recipient.address, recipient.amount))
+        .collect();
 
     let mut psbt = workflow::construct_psbt(&keys, &recipient_pairs)?;
     psbt.inputs[0].previous_txid = FIXTURE_PREV_TXID_HEX.parse::<Txid>().expect("static txid");
@@ -129,7 +137,7 @@ pub fn build_payroll(config: BuildPayrollConfig) -> Result<BuildPayrollResult> {
 
     add_party_contribution(&secp, &mut psbt, &keys, "Alice", &scan_keys)?;
 
-    let descriptor = build_descriptor();
+    let descriptor = build_descriptor(config.key_arch);
     let descriptor_path = config.out_dir.join("desc-musig-sp-demo.txt");
     fs::write(&descriptor_path, &descriptor)?;
 
@@ -141,7 +149,7 @@ pub fn build_payroll(config: BuildPayrollConfig) -> Result<BuildPayrollResult> {
         cosigner_contrib_psbt_path,
         descriptor_path,
         descriptor,
-        recipient_count: recipients.len(),
+        recipient_count,
         outputs,
     })
 }
@@ -328,12 +336,18 @@ fn add_payroll_tap_derivations(psbt: &mut SilentPaymentPsbt, keys: &KeySetup) ->
         .position(|output| output.sp_v0_info.is_none())
         .ok_or_else(|| anyhow::anyhow!("no change output present"))?;
 
+    // Under DeriveThenAggregate the participant keys are the per-index children,
+    // so their origins carry the full path a signer derives them along.
+    let mut path = BIP48_ACCOUNT_PATH.to_vec();
+    if keys.key_arch == workflow::KeyArch::DeriveThenAggregate {
+        path.extend([0, workflow::DEMO_SP_INDEX]);
+    }
     for (participant_pk, cosigner) in [keys.alice_pk, keys.bob_pk, keys.charlie_pk]
         .iter()
         .zip(COSIGNERS_TEST.iter())
     {
         let (xonly, _) = participant_pk.x_only_public_key();
-        add_tap_derivation(psbt, change_idx, &xonly, cosigner.xfp, &BIP48_ACCOUNT_PATH);
+        add_tap_derivation(psbt, change_idx, &xonly, cosigner.xfp, &path);
     }
     Ok(())
 }
@@ -397,7 +411,7 @@ fn test_nonce_seed(party: &str) -> [u8; 32] {
     seed
 }
 
-fn build_descriptor() -> String {
+fn build_descriptor(key_arch: workflow::KeyArch) -> String {
     let parts: Vec<String> = COSIGNERS_TEST
         .iter()
         .map(|cosigner| {
@@ -405,7 +419,13 @@ fn build_descriptor() -> String {
             format!("[{}/48h/1h/0h/3h]{}", xfp_hex, cosigner.xpub_str)
         })
         .collect();
-    format!("tr(musig({})/0/*)", parts.join(","))
+    match key_arch {
+        workflow::KeyArch::AggregateThenDerive => format!("tr(musig({})/<0;1>/*)", parts.join(",")),
+        workflow::KeyArch::DeriveThenAggregate => {
+            let parts: Vec<String> = parts.iter().map(|part| format!("{part}/<0;1>/*")).collect();
+            format!("tr(musig({}))", parts.join(","))
+        }
+    }
 }
 
 fn payroll_outputs(
