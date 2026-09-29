@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use bitcoin::Amount;
 use serde::{Deserialize, Serialize};
-use silentpayments::SilentPaymentAddress;
+use silentpayments::SilentPaymentCode;
 use std::fs;
 use std::path::Path;
 
@@ -23,7 +23,7 @@ pub struct RecipientEntry {
 pub struct PayrollRecipient {
     pub label: Option<String>,
     pub amount: Amount,
-    pub address: SilentPaymentAddress,
+    pub address: SilentPaymentCode,
 }
 
 pub fn load_recipients(path: impl AsRef<Path>) -> Result<Vec<PayrollRecipient>> {
@@ -73,13 +73,13 @@ impl RecipientEntry {
         Ok(PayrollRecipient {
             label: self.label,
             amount: Amount::from_sat(self.amount_sat),
-            address: SilentPaymentAddress::try_from(self.address.as_str())
+            address: SilentPaymentCode::try_from(self.address.as_str())
                 .with_context(|| format!("recipient[{idx}] has invalid address"))?,
         })
     }
 }
 
-pub fn address_amounts(recipients: &[PayrollRecipient]) -> Vec<(SilentPaymentAddress, Amount)> {
+pub fn address_amounts(recipients: &[PayrollRecipient]) -> Vec<(SilentPaymentCode, Amount)> {
     recipients
         .iter()
         .map(|recipient| (recipient.address, recipient.amount))
@@ -90,17 +90,16 @@ pub fn address_amounts(recipients: &[PayrollRecipient]) -> Vec<(SilentPaymentAdd
 mod tests {
     use super::*;
     use secp256k1::{PublicKey, Secp256k1, SecretKey};
-    use silentpayments::{Network as SpNetwork, SpVersion};
+    use silentpayments::Network as SpNetwork;
 
     fn test_address() -> String {
         let secp = Secp256k1::new();
         let scan_sk = SecretKey::from_slice(&[3u8; 32]).expect("scan key");
         let spend_sk = SecretKey::from_slice(&[4u8; 32]).expect("spend key");
-        SilentPaymentAddress::new(
+        SilentPaymentCode::new_v0(
             PublicKey::from_secret_key(&secp, &scan_sk),
             PublicKey::from_secret_key(&secp, &spend_sk),
             SpNetwork::Testnet,
-            SpVersion::ZERO,
         )
         .to_string()
     }

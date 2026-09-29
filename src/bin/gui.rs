@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::{Address, Amount, Transaction, Txid};
 use chrono::{Local, NaiveDate};
 use copypasta::{ClipboardContext, ClipboardProvider};
-use psbt::Psbt as SilentPaymentPsbt;
+use psbt_v2::Psbt as SilentPaymentPsbt;
 use serde::{Deserialize, Serialize};
 use silent_pay::{
     build_initial_payroll_psbt, derive_treasury_script_pubkey, finalize_payroll, load_recipients,

@@ -8,7 +8,7 @@ use bitcoin::Amount;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
+use silentpayments::{Network as SpNetwork, SilentPaymentCode};
 use std::fs;
 use std::path::Path;
 
@@ -61,7 +61,7 @@ pub struct DemoScanTarget {
     pub label: Option<String>,
     pub amount: Amount,
     pub scan_sk: SecretKey,
-    pub address: SilentPaymentAddress,
+    pub address: SilentPaymentCode,
 }
 
 /// Build watch-only demo recipients from `RECIPIENT_SEEDS`: each carries a
@@ -76,7 +76,7 @@ pub fn generate_demo_recipients() -> Vec<DemoRecipientEntry> {
             let scan_pk = PublicKey::from_secret_key(&secp, &scan_sk);
             let spend_pk = PublicKey::from_secret_key(&secp, &spend_sk);
             let address =
-                SilentPaymentAddress::new(scan_pk, spend_pk, DEMO_NETWORK, SpVersion::ZERO);
+                SilentPaymentCode::new_v0(scan_pk, spend_pk, DEMO_NETWORK);
             DemoRecipientEntry {
                 label: Some(format!("recipient-{}", idx + 1)),
                 amount_sat: *amount_sat,
@@ -142,7 +142,7 @@ fn resolve_target(idx: usize, entry: DemoRecipientEntry) -> Result<DemoScanTarge
             let address_str = entry
                 .address
                 .ok_or_else(|| anyhow::anyhow!("recipient[{idx}] scan_key_hex requires address"))?;
-            let address = SilentPaymentAddress::try_from(address_str.as_str())
+            let address = SilentPaymentCode::try_from(address_str.as_str())
                 .map_err(|e| anyhow::anyhow!("recipient[{idx}] invalid address: {e}"))?;
             (scan_sk, address)
         }
@@ -152,13 +152,12 @@ fn resolve_target(idx: usize, entry: DemoRecipientEntry) -> Result<DemoScanTarge
             let secp = Secp256k1::new();
             let (scan_sk, spend_sk) = recipient_keys(&seed);
             let address = match entry.address {
-                Some(address_str) => SilentPaymentAddress::try_from(address_str.as_str())
+                Some(address_str) => SilentPaymentCode::try_from(address_str.as_str())
                     .map_err(|e| anyhow::anyhow!("recipient[{idx}] invalid address: {e}"))?,
-                None => SilentPaymentAddress::new(
+                None => SilentPaymentCode::new_v0(
                     PublicKey::from_secret_key(&secp, &scan_sk),
                     PublicKey::from_secret_key(&secp, &spend_sk),
                     DEMO_NETWORK,
-                    SpVersion::ZERO,
                 ),
             };
             (scan_sk, address)

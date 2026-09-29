@@ -5,7 +5,7 @@ use silentpayments::receiving::{Label, Receiver};
 use silentpayments::utils::receiving::PublicTweakData;
 use silentpayments::utils::OutPoint as SpOutPoint;
 use silentpayments::{
-    Network, SilentPaymentAddress, SpVersion, TransactionInputs, TransactionSharedSecret,
+    Network, SilentPaymentCode, SpVersion, TransactionInputs, TransactionSharedSecret,
 };
 use sp_demo::recipients::recipient_keys;
 use sp_demo::workflow;
@@ -13,7 +13,7 @@ use sp_demo::workflow::KeyArch;
 
 struct TestRecipient {
     amount: Amount,
-    address: SilentPaymentAddress,
+    address: SilentPaymentCode,
     scan_sk: SecretKey,
     scan_pk: PublicKey,
     spend_pk: PublicKey,
@@ -29,7 +29,7 @@ fn seeded_recipient(
     let spend_pk = PublicKey::from_secret_key(secp, &spend_sk);
     TestRecipient {
         amount: Amount::from_sat(amount_sat),
-        address: SilentPaymentAddress::new(scan_pk, spend_pk, Network::Mainnet, SpVersion::ZERO),
+        address: SilentPaymentCode::new_v0(scan_pk, spend_pk, Network::Mainnet),
         scan_sk,
         scan_pk,
         spend_pk,
@@ -61,7 +61,7 @@ fn sp_outputs_discoverable_by_recipients_impl(arch: KeyArch) {
     ];
     let scan_keys: Vec<PublicKey> = recipient_pairs
         .iter()
-        .map(|(addr, _)| addr.get_scan_key())
+        .map(|(addr, _)| addr.scan_key())
         .collect();
     for (name, sk, pk) in &parties {
         for scan in &scan_keys {
@@ -74,7 +74,7 @@ fn sp_outputs_discoverable_by_recipients_impl(arch: KeyArch) {
     let mut tx_inputs = TransactionInputs::with_capacity(psbt.inputs.len());
     for input in &psbt.inputs {
         let outpoint = SpOutPoint::from_txid_and_vout(
-            input.previous_txid.to_string(),
+            &input.previous_txid.to_string(),
             input.spent_output_index,
         )
         .expect("outpoint");
@@ -139,7 +139,7 @@ fn rejects_incomplete_musig2_contributor_set_impl(arch: KeyArch) {
     let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX, arch).expect("key setup");
     let recipients = vec![(keys.sp_address.clone(), Amount::from_sat(1_000))];
     let mut psbt = workflow::construct_psbt(&keys, &recipients).expect("construct");
-    let scan = keys.sp_address.get_scan_key();
+    let scan = keys.sp_address.scan_key();
 
     workflow::add_ecdh_share(
         &secp,
@@ -171,7 +171,7 @@ fn rejects_invalid_participant_dleq_proof_impl(arch: KeyArch) {
     let keys = workflow::setup_keys(&secp, workflow::DEMO_SP_INDEX, arch).expect("key setup");
     let recipients = vec![(keys.sp_address.clone(), Amount::from_sat(1_000))];
     let mut psbt = workflow::construct_psbt(&keys, &recipients).expect("construct");
-    let scan = keys.sp_address.get_scan_key();
+    let scan = keys.sp_address.scan_key();
 
     for (name, sk, pk) in [
         ("Alice", &keys.alice_sk, &keys.alice_pk),
@@ -209,7 +209,7 @@ fn repeated_scan_key_uses_distinct_output_indices_impl(arch: KeyArch) {
         (keys.sp_address.clone(), Amount::from_sat(2_000)),
     ];
     let mut psbt = workflow::construct_psbt(&keys, &recipients).expect("construct");
-    let scan = keys.sp_address.get_scan_key();
+    let scan = keys.sp_address.scan_key();
 
     for (name, sk, pk) in [
         ("Alice", &keys.alice_sk, &keys.alice_pk),

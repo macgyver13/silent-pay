@@ -11,8 +11,9 @@ use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::{OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-use psbt::roles::{ExtractorPsbtExt, InputWitnessFinalizerPsbtExt};
-use psbt::Psbt as SilentPaymentPsbt;
+use psbt::roles::SpExtractorExt;
+use psbt_v2::Finalizer;
+use psbt_v2::Psbt as SilentPaymentPsbt;
 use secp256k1::Secp256k1;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,13 +72,13 @@ pub fn finalize_payroll(psbt_path: impl AsRef<Path>) -> Result<FinalizePayrollRe
     // Aggregate the partial signatures already present in the PSBT and extract the tx.
     let message = compute_sighash(&psbt)?;
     aggregate_musig2_sigs(&mut psbt.inputs[0], &key_agg_ctx, &message)?;
-    let psbt = psbt
-        .clone()
-        .finalize()
+    let psbt = Finalizer::new(psbt)
+        .map_err(|e| anyhow!("finalizer new: {e:?}"))?
+        .finalize(&secp)
         .map_err(|e| anyhow!("finalize witnesses: {e:?}"))?;
     let tx = psbt
         .clone()
-        .extract_tx()
+        .extract_tx(&secp)
         .map_err(|e| anyhow!("extract: {e:?}"))?;
     let tx_hex = bitcoin::consensus::encode::serialize_hex(&tx);
 
