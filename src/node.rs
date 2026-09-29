@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::{Network, ScriptBuf, Txid};
 use bitcoincore_rpc::json::ScanTxOutRequest;
 use bitcoincore_rpc::{Auth, Client, RpcApi};
-use crate::{derive_treasury_script_pubkey, TreasuryWalletConfig, CHANGE_CHAIN, RECEIVE_CHAIN};
+use crate::{derive_treasury_script_pubkey, TreasuryWalletConfig};
 use silentpayments::Network as SpNetwork;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -196,7 +196,7 @@ fn is_scan_in_progress(err: &bitcoincore_rpc::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse_wallet;
+    use crate::{parse_wallet, CHANGE_CHAIN, RECEIVE_CHAIN};
 
     const TEST_WALLET_TOML: &str = r#"
 network = "testnet"

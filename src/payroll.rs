@@ -3,11 +3,10 @@ use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
 use bitcoin::key::{TweakedPublicKey, XOnlyPublicKey};
 use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, Txid};
 use hmac::{Hmac, Mac};
-use psbt::{core::utils::to_sp_v0_info, Psbt};
-use psbt_v2::Output;
+use psbt_v2::{Output, Psbt, SpV0Info};
 use secp256k1::{PublicKey, Secp256k1};
 use sha2::Sha512;
-use silentpayments::Network as SpNetwork;
+use silentpayments::{Network as SpNetwork, SilentPaymentCode};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -324,7 +323,7 @@ fn construct_initial_psbt(
     input_keys: &WalletPublicKeys,
     change_keys: &WalletPublicKeys,
     prevout: &TreasuryPrevout,
-    recipients: &[(silentpayments::SilentPaymentAddress, Amount)],
+    recipients: &[(SilentPaymentCode, Amount)],
     change: Option<Amount>,
 ) -> Result<Psbt> {
     let mut outputs: Vec<Output> = recipients
@@ -334,7 +333,10 @@ fn construct_initial_psbt(
                 value: *amount,
                 script_pubkey: ScriptBuf::new(),
             });
-            output.sp_v0_info = Some(to_sp_v0_info(&address));
+            output.sp_v0_info = Some(SpV0Info::new(
+                bitcoin::CompressedPublicKey(address.scan_key()),
+                bitcoin::CompressedPublicKey(address.m_pubkey()),
+            ));
             output
         })
         .collect();
@@ -416,10 +418,10 @@ fn validate_recipient_networks(
     recipients: &[PayrollRecipient],
 ) -> Result<()> {
     for (idx, recipient) in recipients.iter().enumerate() {
-        if recipient.address.get_network() != wallet_network {
+        if recipient.address.network() != wallet_network {
             bail!(
                 "recipient[{idx}] network {:?} does not match wallet network {:?}",
-                recipient.address.get_network(),
+                recipient.address.network(),
                 wallet_network
             );
         }
@@ -466,7 +468,7 @@ mod tests {
     use crate::recipients::RecipientEntry;
     use crate::wallet::{descriptor_from_signers, TreasurySigner};
     use secp256k1::SecretKey;
-    use silentpayments::{SilentPaymentAddress, SpVersion};
+    use silentpayments::SilentPaymentCode;
     use std::collections::HashSet;
     use std::str::FromStr;
 
@@ -531,11 +533,10 @@ mod tests {
         let secp = Secp256k1::new();
         let scan_sk = SecretKey::from_slice(&[3u8; 32]).expect("scan key");
         let spend_sk = SecretKey::from_slice(&[4u8; 32]).expect("spend key");
-        let address = SilentPaymentAddress::new(
+        let address = SilentPaymentCode::new_v0(
             PublicKey::from_secret_key(&secp, &scan_sk),
             PublicKey::from_secret_key(&secp, &spend_sk),
             SpNetwork::Testnet,
-            SpVersion::ZERO,
         );
         crate::recipients::save_recipients(
             path,

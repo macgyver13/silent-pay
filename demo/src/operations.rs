@@ -3,12 +3,12 @@ use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
 use bitcoin::key::XOnlyPublicKey;
 use bitcoin::{Amount, Txid};
 use psbt::roles::signer::extract_eligible_input_pubkey;
-use psbt::Psbt as SilentPaymentPsbt;
+use psbt_v2::Psbt as SilentPaymentPsbt;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use silentpayments::receiving::{Label, Receiver};
 use silentpayments::utils::receiving::PublicTweakData;
 use silentpayments::utils::OutPoint as SpOutPoint;
-use silentpayments::{SilentPaymentAddress, SpVersion, TransactionInputs, TransactionSharedSecret};
+use silentpayments::{SilentPaymentCode, SpVersion, TransactionInputs, TransactionSharedSecret};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -127,7 +127,7 @@ pub fn build_payroll(config: BuildPayrollConfig) -> Result<BuildPayrollResult> {
 
     let scan_keys: Vec<_> = recipient_pairs
         .iter()
-        .map(|(addr, _)| addr.get_scan_key())
+        .map(|(addr, _)| addr.scan_key())
         .collect();
     add_party_contribution(&secp, &mut psbt, &keys, "Bob", &scan_keys)?;
     add_party_contribution(&secp, &mut psbt, &keys, "Charlie", &scan_keys)?;
@@ -171,13 +171,13 @@ pub fn scan_recipients(
     let mut recipient_results = Vec::new();
     for (idx, target) in targets.iter().enumerate() {
         let scan_pk = PublicKey::from_secret_key(&secp, &target.scan_sk);
-        let spend_pk = target.address.get_spend_key();
+        let spend_pk = target.address.m_pubkey();
         let receiver = Receiver::new(
             SpVersion::ZERO,
             scan_pk,
             spend_pk,
             Label::new(target.scan_sk, 0),
-            target.address.get_network(),
+            target.address.network(),
         )
         .map_err(|e| anyhow::anyhow!("Receiver::new: {e}"))?;
 
@@ -232,14 +232,14 @@ pub fn scan_recipients(
 pub fn verify_receipt(
     secp: &Secp256k1<secp256k1::All>,
     psbt: &SilentPaymentPsbt,
-    address: &SilentPaymentAddress,
+    address: &SilentPaymentCode,
     scan_sk: SecretKey,
 ) -> Result<VerifyReceiptResult> {
     let scan_pk = PublicKey::from_secret_key(secp, &scan_sk);
-    if address.get_scan_key() != scan_pk {
+    if address.scan_key() != scan_pk {
         bail!("scan key does not match the address scan key");
     }
-    let spend_pk = address.get_spend_key();
+    let spend_pk = address.m_pubkey();
 
     let (tweak_data, candidates) = load_scan_context(secp, psbt)?;
     let candidate_xonly: Vec<_> = candidates.iter().map(|(_, x, _)| *x).collect();
@@ -249,7 +249,7 @@ pub fn verify_receipt(
         scan_pk,
         spend_pk,
         Label::new(scan_sk, 0),
-        address.get_network(),
+        address.network(),
     )
     .map_err(|e| anyhow::anyhow!("Receiver::new: {e}"))?;
 
@@ -293,7 +293,7 @@ fn load_scan_context(
     let mut eligible_count = 0usize;
     for input in &psbt.inputs {
         let outpoint = SpOutPoint::from_txid_and_vout(
-            input.previous_txid.to_string(),
+            &input.previous_txid.to_string(),
             input.spent_output_index,
         )
         .map_err(|e| anyhow::anyhow!("outpoint: {e}"))?;
@@ -430,16 +430,16 @@ fn build_descriptor(key_arch: workflow::KeyArch) -> String {
 
 fn payroll_outputs(
     psbt: &SilentPaymentPsbt,
-    recipients: &[(silentpayments::SilentPaymentAddress, Amount)],
+    recipients: &[(silentpayments::SilentPaymentCode, Amount)],
 ) -> Result<Vec<PayrollOutput>> {
     let mut outputs = Vec::new();
     for (idx, output) in psbt.outputs.iter().enumerate() {
-        let Some((scan, spend)) = output.sp_info()? else {
+        let Some((scan, spend)) = output.sp_info() else {
             continue;
         };
         if let Some((addr, amount)) = recipients
             .iter()
-            .find(|(addr, _)| addr.get_scan_key() == scan && addr.get_spend_key() == spend)
+            .find(|(addr, _)| addr.scan_key() == scan && addr.m_pubkey() == spend)
         {
             outputs.push(PayrollOutput {
                 output_index: idx,

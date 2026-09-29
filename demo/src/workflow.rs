@@ -12,11 +12,21 @@ use bitcoin::{
 };
 use musig2::SecNonce;
 use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
-use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
+use rust_dleq::{generate_dleq_proof, verify_dleq_proof};
+use silentpayments::{Network as SpNetwork, SilentPaymentCode};
 
-use psbt::core::utils::{to_psbt_dleq, to_sp_v0_info};
-use psbt::{generate_dleq_proof, verify_dleq_proof, Psbt};
-use psbt_v2::{Output, PartialEcdhShareData};
+use psbt_v2::{DleqProof, Output, PartialEcdhShareData, Psbt, SpV0Info};
+
+fn to_psbt_dleq(p: rust_dleq::DleqProof) -> DleqProof {
+    DleqProof(p.0)
+}
+
+fn to_sp_v0_info(address: &SilentPaymentCode) -> SpV0Info {
+    SpV0Info::new(
+        bitcoin::CompressedPublicKey(address.scan_key()),
+        bitcoin::CompressedPublicKey(address.m_pubkey()),
+    )
+}
 
 use psbt::musig2::{build_psbt, finalize_sp_outputs};
 use psbt::roles::musig2_signer as signing;
@@ -65,7 +75,7 @@ pub struct KeySetup {
     pub p2tr_script: ScriptBuf,
     pub scan_pk: PublicKey,
     pub scan_sk: SecretKey,
-    pub sp_address: SilentPaymentAddress,
+    pub sp_address: SilentPaymentCode,
     /// Which key architecture produced this key material. `construct_psbt` reads
     /// this to decide whether to record a synthetic aggregate-derivation origin
     /// (`AggregateThenDerive`) or omit it (`DeriveThenAggregate`) -- see
@@ -249,7 +259,7 @@ pub fn setup_keys(
     let scan_pk = PublicKey::from_secret_key(secp, &scan_sk);
     let spend_pk = PublicKey::from_secret_key(secp, &spend_sk);
     let sp_address =
-        SilentPaymentAddress::new(scan_pk, spend_pk, SpNetwork::Mainnet, SpVersion::ZERO);
+        SilentPaymentCode::new_v0(scan_pk, spend_pk, SpNetwork::Mainnet);
 
     Ok(KeySetup {
         alice_sk,
@@ -277,7 +287,7 @@ pub fn setup_keys(
 /// returning to the same MuSig2 script is appended automatically (9 000 sats).
 pub fn construct_psbt(
     keys: &KeySetup,
-    recipients: &[(SilentPaymentAddress, Amount)],
+    recipients: &[(SilentPaymentCode, Amount)],
 ) -> Result<Psbt> {
     let total_payment: u64 = recipients.iter().map(|(_, a)| a.to_sat()).sum();
     let change_amount = Amount::from_sat(9_000);
