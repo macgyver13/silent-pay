@@ -85,6 +85,18 @@ fn testnet_network_uses_testnet_default_paths() {
 }
 
 #[test]
+fn signet_network_uses_signet_default_paths() {
+    assert_eq!(
+        default_path_for_network("signet", "/tmp/silent-pay", "wallet.toml", "wallet.toml"),
+        PathBuf::from("/tmp/silent-pay/signet/wallet.toml")
+    );
+    assert_eq!(
+        default_path_for_network("testnet", "/tmp/silent-pay", "signet/wallet.toml", "wallet.toml"),
+        PathBuf::from("/tmp/silent-pay/testnet/wallet.toml")
+    );
+}
+
+#[test]
 fn mainnet_network_uses_mainnet_default_paths() {
     assert_eq!(
         default_path_for_network("mainnet", ".", "wallet.toml", "wallet.toml"),

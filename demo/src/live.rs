@@ -108,7 +108,7 @@ pub fn scan_funded_prevout(
 /// On regtest this mines the confirmation block itself, to `regtest_mine_to`
 /// (any valid regtest address -- the treasury address is a convenient choice
 /// since the caller already has it, avoiding any dependency on a Core
-/// wallet). On any other network it polls `gettransaction` until Core reports
+/// wallet). On any other network it polls `gettxout` until Core reports
 /// a confirmation or `timeout` elapses.
 pub fn broadcast_and_confirm(
     client: &Client,
@@ -129,9 +129,11 @@ pub fn broadcast_and_confirm(
 
     let deadline = Instant::now() + timeout;
     loop {
+        // gettxout, not gettransaction: the treasury is not in a Core wallet.
+        // Every output of a just-broadcast tx is unspent, so vout 0 is enough.
         let confirmed = client
-            .get_transaction(&txid, None)
-            .map(|result| result.info.confirmations > 0)
+            .get_tx_out(&txid, 0, Some(false))
+            .map(|result| result.is_some_and(|out| out.confirmations > 0))
             .unwrap_or(false);
         if confirmed {
             return Ok(txid);
