@@ -118,8 +118,15 @@ impl TreasuryWalletConfig {
                 .with_context(|| format!("signer[{idx}] is invalid"))?;
         }
         let descriptor = descriptor_from_signers(&signers, key_arch);
+        // SpNetwork folds signet into Testnet; keep the name so a saved signet
+        // wallet reloads as signet.
+        let network = if self.network.trim().eq_ignore_ascii_case("signet") {
+            "signet"
+        } else {
+            network_name(network)
+        };
         Ok(Self {
-            network: network_name(network).to_string(),
+            network: network.to_string(),
             descriptor,
             last_derivation_index: self.last_derivation_index,
             change_derivation_index: self.change_derivation_index,
@@ -334,6 +341,19 @@ mod tests {
         assert_eq!(wallet.signers[0].derivation_path, "m/48h/1h/0h/3h");
         assert_eq!(wallet.signers[1].xpub, XPUB2);
         assert_eq!(wallet.key_arch, WalletKeyArch::DeriveThenAggregate);
+    }
+
+    #[test]
+    fn keeps_signet_network_name() {
+        let descriptor = format!(
+            "tr(musig([0f056943/48h/1h/0h/3h]{XPUB1}/<0;1>/*,[6ba6cfd0/48h/1h/0h/3h]{XPUB2}/<0;1>/*))"
+        );
+        let wallet = parse_wallet(&format!(
+            "network = \"signet\"\ndescriptor = \"{descriptor}\"\n"
+        ))
+        .expect("wallet");
+        assert_eq!(wallet.network, "signet");
+        assert_eq!(wallet.network_value().expect("network"), SpNetwork::Testnet);
     }
 
     #[test]

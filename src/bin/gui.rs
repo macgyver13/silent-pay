@@ -1506,6 +1506,8 @@ fn default_network_directory(network: &str) -> Option<&'static str> {
     let network = network.to_lowercase();
     if network.contains("testnet") {
         Some("testnet")
+    } else if network.contains("signet") {
+        Some("signet")
     } else if network.contains("mainnet") || network.contains("bitcoin") {
         Some("mainnet")
     } else {
@@ -1523,7 +1525,7 @@ fn is_default_file_path(path: &Path, file_name: &str) -> bool {
     path.parent()
         .and_then(Path::file_name)
         .and_then(|parent| parent.to_str())
-        .is_some_and(|parent| parent == "testnet" || parent == "mainnet")
+        .is_some_and(|parent| matches!(parent, "testnet" | "signet" | "mainnet"))
         && path.file_name().and_then(|name| name.to_str()) == Some(file_name)
 }
 
