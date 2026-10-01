@@ -29,7 +29,7 @@ fn to_sp_v0_info(address: &SilentPaymentCode) -> SpV0Info {
 }
 
 use psbt::musig2::{build_psbt, finalize_sp_outputs};
-use psbt::roles::musig2_signer as signing;
+use psbt::musig2_signer as signing;
 
 /// How the per-index MuSig2 aggregate key is produced. Mirrors
 /// `psbt::musig2::keyagg::AggregationMode`; kept as a separate demo-local type so

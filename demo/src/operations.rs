@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
 use bitcoin::key::XOnlyPublicKey;
 use bitcoin::{Amount, Txid};
-use psbt::roles::signer::extract_eligible_input_pubkey;
+use psbt::signer::extract_eligible_input_pubkey;
 use psbt_v2::Psbt as SilentPaymentPsbt;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use silentpayments::receiving::{Label, Receiver};
