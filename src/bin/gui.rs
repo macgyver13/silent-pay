@@ -4,6 +4,7 @@ use chrono::{Local, NaiveDate};
 use copypasta::{ClipboardContext, ClipboardProvider};
 use psbt_v2::Psbt as SilentPaymentPsbt;
 use serde::{Deserialize, Serialize};
+use silentpayments::{Network as SpNetwork, SilentPaymentCode};
 use silent_pay::{
     build_initial_payroll_psbt, derive_treasury_script_pubkey, finalize_payroll, load_recipients,
     load_wallet, node, save_recipients, save_wallet, BuildInitialPayrollConfig, PayrollRecipient,
@@ -459,6 +460,10 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
         ui.get_finalize_psbt_path().as_str(),
     );
     ui.set_finalize_psbt_path(finalize_psbt_path.display().to_string().into());
+    let Some(built_psbt_path) = built_psbt_path_from_ui(&ui) else {
+        return Ok("Finalize canceled: the built PSBT is needed to check the signed one".to_string());
+    };
+    let recipient_lines = check_signed_payroll(&ui, &built_psbt_path, &finalize_psbt_path)?;
     let result = finalize_payroll(&finalize_psbt_path)
         .context("failed to finalize PSBT; make sure it contains all required contributions")?;
     let final_tx = final_tx_from_hex(result.tx_hex.as_str())?;
@@ -478,9 +483,10 @@ fn finalize_loaded_psbt_from_ui(weak: &slint::Weak<PayrollGui>) -> Result<String
     ui.set_final_tx_hex_path(result.final_tx_hex_path.display().to_string().into());
     ui.set_finalize_summary(
         format!(
-            "txid: {}\nverified SP outputs: {}\nspent input: {}:{}\n{}\nfinal PSBT: {}\nfinal tx hex: {}",
+            "txid: {}\nverified SP outputs: {}\n{}\nspent input: {}:{}\n{}\nfinal PSBT: {}\nfinal tx hex: {}",
             result.txid,
             result.verified_outputs,
+            recipient_lines.join("\n"),
             spent.txid,
             spent.vout,
             finalized_state.change_summary,
@@ -1410,6 +1416,134 @@ fn change_prevout_from_tx(
         status: UtxoStatus::Available,
         label: Some(today_payroll_change_label()),
     }))
+}
+
+/// The PSBT Build saved, or one the user picks when that path is empty or gone
+/// (eg. after a restart on another day). None if the pick is canceled.
+fn built_psbt_path_from_ui(ui: &PayrollGui) -> Option<PathBuf> {
+    let path = data_dir_path(ui.get_data_dir().as_str(), ui.get_psbt_path().as_str());
+    if ui.get_psbt_path().trim().is_empty() || !path.is_file() {
+        let picked = rfd::FileDialog::new()
+            .set_title("Open the PSBT Build saved for this payroll")
+            .pick_file()?;
+        ui.set_psbt_path(picked.display().to_string().into());
+        return Some(picked);
+    }
+    Some(path)
+}
+
+/// Check a signed payroll PSBT before finalizing it: it must spend an available
+/// UTXO from utxos.toml and be the payroll Build saved. Returns one summary line
+/// per recipient.
+fn check_signed_payroll(
+    ui: &PayrollGui,
+    built_psbt_path: &Path,
+    signed_psbt_path: &Path,
+) -> Result<Vec<String>> {
+    let read = |path: &Path| -> Result<SilentPaymentPsbt> {
+        let bytes =
+            fs::read(path).with_context(|| format!("failed to read PSBT {}", path.display()))?;
+        SilentPaymentPsbt::deserialize(&bytes)
+            .with_context(|| format!("failed to parse PSBT {}", path.display()))
+    };
+    let built = read(built_psbt_path)?;
+    let signed = read(signed_psbt_path)?;
+
+    let utxos_path = default_path_for_network(
+        ui.get_wallet_network().as_str(),
+        ui.get_data_dir().as_str(),
+        ui.get_utxos_path().as_str(),
+        "utxos.toml",
+    );
+    check_spent_utxo_available(&load_utxos_or_default(&utxos_path)?, &signed)?;
+    check_signed_matches_built(&built, &signed, wallet_from_ui(ui)?.network_value()?)
+}
+
+/// The signed PSBT's single input must be a UTXO utxos.toml holds as available.
+/// A spent one is let through: re-finalizing a recorded payroll reports it as
+/// already recorded.
+fn check_spent_utxo_available(utxos: &UtxoFile, signed: &SilentPaymentPsbt) -> Result<()> {
+    if signed.inputs.len() != 1 {
+        bail!("expected exactly one input in the signed PSBT, found {}", signed.inputs.len());
+    }
+    let input = &signed.inputs[0];
+    let txid = input.previous_txid.to_string();
+    if !utxos
+        .utxos
+        .iter()
+        .any(|utxo| utxo.txid == txid && utxo.vout == input.spent_output_index)
+    {
+        bail!(
+            "signed PSBT spends {txid}:{}, which is not a UTXO in utxos.toml",
+            input.spent_output_index
+        );
+    }
+    Ok(())
+}
+
+/// The signed PSBT must be the payroll Build saved: the same input, and the same
+/// outputs in the same order, paying the same recipients and amounts. The silent
+/// payment scripts are not compared here; Build leaves them unresolved and
+/// finalize_payroll checks them against the ECDH shares.
+fn check_signed_matches_built(
+    built: &SilentPaymentPsbt,
+    signed: &SilentPaymentPsbt,
+    network: SpNetwork,
+) -> Result<Vec<String>> {
+    let outpoints = |psbt: &SilentPaymentPsbt| -> Vec<(Txid, u32)> {
+        psbt.inputs
+            .iter()
+            .map(|input| (input.previous_txid, input.spent_output_index))
+            .collect()
+    };
+    if outpoints(built) != outpoints(signed) {
+        bail!("signed PSBT spends different inputs than the built PSBT");
+    }
+    if built.outputs.len() != signed.outputs.len() {
+        bail!(
+            "signed PSBT has {} outputs, the built PSBT has {}",
+            signed.outputs.len(),
+            built.outputs.len()
+        );
+    }
+
+    let mut recipient_lines = Vec::new();
+    for (vout, (built_output, signed_output)) in
+        built.outputs.iter().zip(&signed.outputs).enumerate()
+    {
+        if signed_output.amount != built_output.amount {
+            bail!(
+                "output {vout} pays {} sat, the built PSBT pays {} sat",
+                signed_output.amount.to_sat(),
+                built_output.amount.to_sat()
+            );
+        }
+        if signed_output.sp_v0_info != built_output.sp_v0_info {
+            bail!("output {vout} pays a different silent payment recipient than the built PSBT");
+        }
+        match signed_output.sp_info() {
+            Some((scan_key, spend_key)) => {
+                let address = SilentPaymentCode::new_v0(scan_key, spend_key, network).to_string();
+                recipient_lines.push(format!(
+                    "recipient output {vout}: {} sat to {}",
+                    signed_output.amount.to_sat(),
+                    shorten_address(&address)
+                ));
+            }
+            None if signed_output.script_pubkey != built_output.script_pubkey => {
+                bail!("output {vout} pays a different script than the built PSBT");
+            }
+            None => {}
+        }
+    }
+    Ok(recipient_lines)
+}
+
+fn shorten_address(address: &str) -> String {
+    if address.len() <= 24 {
+        return address.to_string();
+    }
+    format!("{}...{}", &address[..14], &address[address.len() - 8..])
 }
 
 fn single_spent_prevout(tx: &Transaction) -> Result<bitcoin::OutPoint> {

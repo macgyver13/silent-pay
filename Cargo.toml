@@ -3,9 +3,9 @@ members = [".", "demo"]
 resolver = "2"
 
 [workspace.dependencies]
-psbt = { git = "https://github.com/macgyver13/spdk.git", rev = "0fcf8e76" }
-psbt-v2 = { git = "https://gitea.bitcoin.ninja/macgyver/rust-psbt.git", rev = "6552113c", features = ["miniscript", "musig2", "silent-payments"] }
-silentpayments = { git = "https://github.com/macgyver13/spdk.git", rev = "0fcf8e76" }
+psbt = { git = "https://github.com/macgyver13/spdk.git", tag = "musig2-master303" }
+psbt-v2 = { git = "https://gitea.bitcoin.ninja/macgyver/rust-psbt.git", tag = "musig2-master303", features = ["miniscript", "musig2", "silent-payments"] }
+silentpayments = { git = "https://github.com/macgyver13/spdk.git", tag = "musig2-master303" }
 
 [package]
 name = "silent-pay"

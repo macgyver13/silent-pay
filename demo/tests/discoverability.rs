@@ -1,5 +1,5 @@
 use bitcoin::Amount;
-use psbt::roles::signer::extract_eligible_input_pubkey;
+use psbt::signer::extract_eligible_input_pubkey;
 use secp256k1::{PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 use silentpayments::receiving::{Label, Receiver};
 use silentpayments::utils::receiving::PublicTweakData;
