@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, bail, Context, Result};
+use bitcoin::hashes::Hash;
 use frost_secp256k1_tr as frost;
 use k256::elliptic_curve::ff::PrimeField;
 use k256::{FieldBytes, Scalar as KScalar};
@@ -15,8 +16,9 @@ use psbt_v2::{Input, Output, PartialEcdhShareData};
 use rand::{CryptoRng, RngCore};
 use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 
+use crate::bip445::{self, TweakContext};
 use crate::derivation::DerivedPublic;
-use crate::ecdh::TweakContext;
+use crate::ecdh;
 use crate::frost_psbt::{FrostInputExt, FrostOutputExt, PublicShare, ThresholdInfo, ThresholdKey};
 
 /// Construct the base BIP-375 PSBT while the generic upstream builder remains
@@ -285,7 +287,7 @@ pub fn finalize_sp_outputs(
     let tweak_context = tweak_context(public)?;
     let input_hash = input_hash(
         &psbt.inputs[0].outpoint_bytes(),
-        &tweak_context.output_key(),
+        &ecdh::output_key(&tweak_context)?,
     )?;
     let input_scalar = Scalar::from_be_bytes(input_hash)
         .map_err(|_| anyhow!("BIP-352 input hash is not a valid scalar"))?;
@@ -303,8 +305,7 @@ pub fn finalize_sp_outputs(
         if shares.keys().copied().collect::<Vec<_>>() != expected_identifiers {
             bail!("incomplete FROST ECDH signer set for Silent Payment output");
         }
-        let aggregate = tweak_context
-            .combine_ecdh(scan_key, &lagrange_weighted(shares)?)?
+        let aggregate = ecdh::combine_ecdh(&tweak_context, scan_key, &lagrange_weighted(shares)?)?
             .mul_tweak(secp, &input_scalar)
             .context("apply BIP-352 input hash to aggregate ECDH share")?;
         let index = output_indices.entry(scan_key.serialize()).or_default();
@@ -364,22 +365,32 @@ pub fn verify_participant_tags(psbt: &Psbt, root: &frost::keys::PublicKeyPackage
     }
     Ok(())
 }
-/// BIP445 tweak context for the address: root threshold key, then the plain
-/// derivation tweaks, then the key-path-only Taproot tweak.
+/// BIP445 tweaks for the address: the plain derivation tweaks, then the
+/// key-path-only Taproot tweak of the derived internal key. ECDH combination
+/// and BIP445 signing both use this list.
+pub(crate) fn address_tweaks(public: &DerivedPublic) -> Result<(Vec<Vec<u8>>, Vec<bool>)> {
+    let mut tweaks: Vec<Vec<u8>> = public.tweaks.iter().map(|tweak| tweak.to_vec()).collect();
+    let mut is_xonly = vec![false; tweaks.len()];
+    let internal =
+        bip445::thresh_pubkey_and_tweak(&threshold_key(&public.root)?, &tweaks, &is_xonly)?;
+    let internal_key = bitcoin::key::UntweakedPublicKey::from_slice(&internal.xonly_pk())
+        .context("derived FROST internal key")?;
+    tweaks.push(
+        bitcoin::taproot::TapTweakHash::from_key_and_tweak(internal_key, None)
+            .to_byte_array()
+            .to_vec(),
+    );
+    is_xonly.push(true);
+    Ok((tweaks, is_xonly))
+}
+
 fn tweak_context(public: &DerivedPublic) -> Result<TweakContext> {
-    let root_key = PublicKey::from_slice(
-        &public
-            .root
-            .verifying_key()
-            .serialize()
-            .context("serialize FROST root group key")?,
-    )
-    .context("convert FROST root group key")?;
-    let mut context = TweakContext::new(root_key);
-    for tweak in &public.tweaks {
-        context = context.apply_tweak(*tweak, false)?;
-    }
-    context.apply_taproot_tweak()
+    let (tweaks, is_xonly) = address_tweaks(public)?;
+    Ok(bip445::thresh_pubkey_and_tweak(
+        &threshold_key(&public.root)?,
+        &tweaks,
+        &is_xonly,
+    )?)
 }
 
 fn lagrange_weighted(
@@ -866,7 +877,7 @@ mod tests {
                 zf_output.x_only_public_key().0,
                 secp256k1::Parity::Even,
             );
-            assert_eq!(context.output_key(), output_key);
+            assert_eq!(ecdh::output_key(&context).unwrap(), output_key);
             let expected = output_key
                 .mul_tweak(&secp, &Scalar::from(scan_secret))
                 .unwrap();
@@ -883,9 +894,9 @@ mod tests {
                         (*keys[index].identifier(), share)
                     })
                     .collect::<BTreeMap<_, _>>();
-                let combined = context
-                    .combine_ecdh(&scan_key, &lagrange_weighted(&shares).unwrap())
-                    .unwrap();
+                let combined =
+                    ecdh::combine_ecdh(&context, &scan_key, &lagrange_weighted(&shares).unwrap())
+                        .unwrap();
                 assert_eq!(
                     combined, expected,
                     "seed {seed}, path {path:?}, pair {pair:?}"

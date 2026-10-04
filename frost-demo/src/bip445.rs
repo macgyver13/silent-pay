@@ -115,6 +115,10 @@ impl TweakContext {
     pub fn plain_pk(&self) -> [u8; 33] {
         compressed(&self.q)
     }
+
+    pub fn has_even_y(&self) -> bool {
+        has_even_y(&self.q)
+    }
 }
 
 fn tweak_ctx_init(thresh_pk: &[u8]) -> Result<TweakContext> {
