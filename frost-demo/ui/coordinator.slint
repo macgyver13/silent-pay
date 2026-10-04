@@ -5,7 +5,7 @@ export component CoordinatorWindow inherits Window {
     width: 680px;
     height: 430px;
     in-out property <string> status: "Set up or load a demo wallet";
-    callback provision-wallet();
+    callback provision-wallet(bool);
     callback load-wallet();
     callback create-session();
     callback launch-companion-one();
@@ -22,7 +22,8 @@ export component CoordinatorWindow inherits Window {
         Text { text: "File-Based FROST Silent Payment Demo"; font-size: 24px; }
         Text { text: root.status; wrap: word-wrap; }
         HorizontalLayout { spacing: 8px;
-            Button { text: "Provision 2-of-3 Wallet"; clicked => { root.provision-wallet(); } }
+            Button { text: "Provision RFC 9591 Wallet"; clicked => { root.provision-wallet(false); } }
+            Button { text: "Provision BIP445 Wallet"; clicked => { root.provision-wallet(true); } }
             Button { text: "Load Wallet"; clicked => { root.load-wallet(); } }
             Button { text: "Create Initial PSBT"; clicked => { root.create-session(); } }
         }

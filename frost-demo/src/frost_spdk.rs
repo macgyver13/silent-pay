@@ -73,12 +73,23 @@ pub fn commit<R: RngCore + CryptoRng>(
     Ok(Round1Secret { identifier, nonces })
 }
 
-/// Coordinator: select every participant that committed as the signer set.
+/// Coordinator: select every participant that published a round-one nonce
+/// (an RFC 9591 commitment or a BIP445 public nonce) as the signer set.
 pub fn select_signers(input: &mut Input, root: &frost::keys::PublicKeyPackage) -> Result<()> {
     validate_threshold_info(input, root)?;
-    let mut identifiers = parse_commitments(input, root)?
-        .into_keys()
-        .map(psbt_identifier)
+    let commitments = input
+        .frost_commitments()
+        .context("parse FROST signing commitments")?;
+    let pub_nonces = input
+        .frost_pub_nonces()
+        .context("parse BIP445 public nonces")?;
+    if !commitments.is_empty() && !pub_nonces.is_empty() {
+        bail!("PSBT mixes RFC 9591 commitments and BIP445 public nonces");
+    }
+    let mut identifiers = commitments
+        .keys()
+        .chain(pub_nonces.keys())
+        .map(|(share, threshold)| psbt_identifier(participant(root, share, threshold)?))
         .collect::<Result<Vec<_>>>()?;
     identifiers.sort_unstable();
     let threshold = root
@@ -86,7 +97,7 @@ pub fn select_signers(input: &mut Input, root: &frost::keys::PublicKeyPackage) -
         .context("FROST public key package is missing its threshold")?;
     if identifiers.len() < usize::from(threshold) {
         bail!(
-            "insufficient FROST commitments: got {}, need {threshold}",
+            "insufficient FROST round-one nonces: got {}, need {threshold}",
             identifiers.len()
         );
     }
@@ -485,7 +496,7 @@ fn frost_identifier(identifier: u8) -> Result<frost::Identifier> {
     frost::Identifier::try_from(u16::from(identifier) + 1).context("invalid BIP445 identifier")
 }
 
-fn threshold_key(root: &frost::keys::PublicKeyPackage) -> Result<ThresholdKey> {
+pub(crate) fn threshold_key(root: &frost::keys::PublicKeyPackage) -> Result<ThresholdKey> {
     root.verifying_key()
         .serialize()
         .context("serialize FROST threshold key")?
@@ -493,7 +504,7 @@ fn threshold_key(root: &frost::keys::PublicKeyPackage) -> Result<ThresholdKey> {
         .map_err(|_| anyhow!("FROST threshold key is not compressed"))
 }
 
-fn public_share(
+pub(crate) fn public_share(
     root: &frost::keys::PublicKeyPackage,
     identifier: &frost::Identifier,
 ) -> Result<PublicShare> {
@@ -543,7 +554,7 @@ fn participant(
 }
 
 /// The coordinator-selected signers, checked against the known threshold info.
-fn signer_set(
+pub(crate) fn signer_set(
     input: &Input,
     root: &frost::keys::PublicKeyPackage,
 ) -> Result<Vec<frost::Identifier>> {
@@ -590,7 +601,7 @@ fn parse_commitments(
     Ok(commitments)
 }
 
-fn validate_key_package(
+pub(crate) fn validate_key_package(
     input: &Input,
     root_key: &frost::keys::KeyPackage,
     root: &frost::keys::PublicKeyPackage,

@@ -10,7 +10,12 @@ cargo run -p frost-demo --bin frost-coordinator
 cargo run -p frost-demo --bin frost-companion
 ```
 
-The coordinator provisions one public wallet file and three 2-of-3 companion share files. Start
+The coordinator provisions one public wallet file and three 2-of-3 companion share files, using
+either signing scheme: **Provision RFC 9591 Wallet** (frost-secp256k1-tr) or **Provision BIP445
+Wallet** (the BIP445 draft, `src/bip445.rs`). Both share the same dealer key material, BIP328
+derivation, PSBT threshold info, and Silent Payment ECDH; they differ only in the round-one nonce
+and round-two signature fields. The scheme is recorded in the wallet and share files, and each
+companion signs with its own file's scheme. Start
 two companion instances, load a different share in each, and exchange the files in this order:
 
 1. Coordinator: create the initial PSBT. It is written as `frost-initial.psbt` beside the wallet.
@@ -37,8 +42,8 @@ and threshold cryptographic flow but is intentionally not a broadcast wallet.
 
 FROST fields use provisional top-level keytypes laid out like BIP373. The input carries the root
 threshold info `0x30` (keyed by the threshold public key: `t`, then each BIP445 identifier and public
-share) and the coordinator's signer set `0x31`. RFC 9591 commitments `0x34` and signature shares
-`0x35` are keyed by public share plus threshold public key; `0x32`/`0x33` are left for BIP445 nonces
-and partial signatures. Change outputs carry the same threshold info as `0x20`. FROST child keys
+share) and the coordinator's signer set `0x31`. Per-participant fields are keyed by public share
+plus threshold public key: BIP445 public nonces `0x32` and partial signatures `0x33`, or RFC 9591
+commitments `0x34` and signature shares `0x35`. Change outputs carry the same threshold info as `0x20`. FROST child keys
 are discovered and authenticated through the standard Taproot BIP32 derivation fields; the demo
 does not define any FROST global keytypes.

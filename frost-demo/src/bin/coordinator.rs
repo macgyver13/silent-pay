@@ -9,7 +9,7 @@ use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::Amount;
 use frost_demo::protocol;
 use frost_demo::session;
-use frost_demo::wallet::{self, PublicWalletFile};
+use frost_demo::wallet::{self, PublicWalletFile, Scheme};
 use psbt::Psbt;
 use slint::ComponentHandle;
 
@@ -119,18 +119,23 @@ fn main() -> anyhow::Result<()> {
 
     let weak = window.as_weak();
     let state_for_callback = state.clone();
-    window.on_provision_wallet(move || {
+    window.on_provision_wallet(move |bip445| {
         let Some(window) = weak.upgrade() else { return };
         let result = (|| {
             let directory = rfd::FileDialog::new()
                 .pick_folder()
                 .context("no folder selected")?;
-            let (path, shares) = wallet::provision(&directory)?;
+            let scheme = if bip445 {
+                Scheme::Bip445
+            } else {
+                Scheme::Rfc9591
+            };
+            let (path, shares) = wallet::provision(&directory, scheme)?;
             let mut state = state_for_callback.borrow_mut();
             state.wallet = Some(PublicWalletFile::load(&path)?);
             state.wallet_directory = Some(directory);
             Ok(format!(
-                "Wallet ready: {} ({} plaintext shares)",
+                "{scheme:?} wallet ready: {} ({} plaintext shares)",
                 path.display(),
                 shares.len()
             ))
@@ -152,9 +157,11 @@ fn main() -> anyhow::Result<()> {
                 .context("wallet file has no parent folder")?
                 .to_owned();
             let mut state = state_for_callback.borrow_mut();
-            state.wallet = Some(PublicWalletFile::load(&path)?);
+            let wallet = PublicWalletFile::load(&path)?;
+            let scheme = wallet.scheme;
+            state.wallet = Some(wallet);
             state.wallet_directory = Some(directory);
-            Ok(format!("Loaded {}", path.display()))
+            Ok(format!("Loaded {scheme:?} wallet {}", path.display()))
         })();
         report(&window, result);
     });

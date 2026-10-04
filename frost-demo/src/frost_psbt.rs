@@ -15,7 +15,8 @@ use thiserror::Error;
 /// FROST output field occupies the `0x2x` range to keep the two maps separate.
 pub const PSBT_IN_FROST_THRESHOLD_INFO: u64 = 0x30;
 pub const PSBT_IN_FROST_SIGNER_SET: u64 = 0x31;
-// 0x32 and 0x33 are reserved for BIP445 public nonces and partial signatures.
+pub const PSBT_IN_FROST_PUB_NONCE: u64 = 0x32;
+pub const PSBT_IN_FROST_PARTIAL_SIG: u64 = 0x33;
 // frost-secp256k1-tr (RFC 9591) values are not BIP445 compatible, so they use
 // their own keytypes.
 pub const PSBT_IN_FROST_RFC9591_COMMITMENT: u64 = 0x34;
@@ -27,6 +28,8 @@ pub fn field_name(key_type: u64) -> Option<&'static str> {
     match key_type {
         PSBT_IN_FROST_THRESHOLD_INFO => Some("PSBT_IN_FROST_THRESHOLD_INFO"),
         PSBT_IN_FROST_SIGNER_SET => Some("PSBT_IN_FROST_SIGNER_SET"),
+        PSBT_IN_FROST_PUB_NONCE => Some("PSBT_IN_FROST_PUB_NONCE"),
+        PSBT_IN_FROST_PARTIAL_SIG => Some("PSBT_IN_FROST_PARTIAL_SIG"),
         PSBT_IN_FROST_RFC9591_COMMITMENT => Some("PSBT_IN_FROST_RFC9591_COMMITMENT"),
         PSBT_IN_FROST_RFC9591_SIGNATURE_SHARE => Some("PSBT_IN_FROST_RFC9591_SIGNATURE_SHARE"),
         PSBT_OUT_FROST_THRESHOLD_INFO => Some("PSBT_OUT_FROST_THRESHOLD_INFO"),
@@ -89,6 +92,22 @@ pub trait FrostInputExt {
         share: &[u8],
     ) -> Result<(), Error>;
     fn frost_signature_shares(&self) -> Result<ParticipantValues, Error>;
+    fn add_frost_pub_nonce(
+        &mut self,
+        public_share: &PublicShare,
+        threshold_key: &ThresholdKey,
+        pub_nonce: &[u8; 66],
+    ) -> Result<(), Error>;
+    /// BIP445 public nonces, each 66 bytes.
+    fn frost_pub_nonces(&self) -> Result<ParticipantValues, Error>;
+    fn add_frost_partial_sig(
+        &mut self,
+        public_share: &PublicShare,
+        threshold_key: &ThresholdKey,
+        partial_sig: &[u8; 32],
+    ) -> Result<(), Error>;
+    /// BIP445 partial signatures, each 32 bytes.
+    fn frost_partial_sigs(&self) -> Result<ParticipantValues, Error>;
 }
 
 /// Per-participant values keyed by `(public share, threshold key)`.
@@ -190,6 +209,46 @@ impl FrostInputExt for Input {
             PSBT_IN_FROST_RFC9591_SIGNATURE_SHARE,
             "signature share",
         )
+    }
+
+    fn add_frost_pub_nonce(
+        &mut self,
+        public_share: &PublicShare,
+        threshold_key: &ThresholdKey,
+        pub_nonce: &[u8; 66],
+    ) -> Result<(), Error> {
+        insert_participant_field(
+            self,
+            PSBT_IN_FROST_PUB_NONCE,
+            "public nonce",
+            public_share,
+            threshold_key,
+            pub_nonce,
+        )
+    }
+
+    fn frost_pub_nonces(&self) -> Result<ParticipantValues, Error> {
+        fixed_length_fields(self, PSBT_IN_FROST_PUB_NONCE, "public nonce", 66)
+    }
+
+    fn add_frost_partial_sig(
+        &mut self,
+        public_share: &PublicShare,
+        threshold_key: &ThresholdKey,
+        partial_sig: &[u8; 32],
+    ) -> Result<(), Error> {
+        insert_participant_field(
+            self,
+            PSBT_IN_FROST_PARTIAL_SIG,
+            "partial signature",
+            public_share,
+            threshold_key,
+            partial_sig,
+        )
+    }
+
+    fn frost_partial_sigs(&self) -> Result<ParticipantValues, Error> {
+        fixed_length_fields(self, PSBT_IN_FROST_PARTIAL_SIG, "partial signature", 32)
     }
 }
 
@@ -372,6 +431,19 @@ fn participant_fields(
     Ok(fields)
 }
 
+fn fixed_length_fields(
+    input: &Input,
+    key_type: u64,
+    field: &'static str,
+    length: usize,
+) -> Result<ParticipantValues, Error> {
+    let fields = participant_fields(input, key_type, field)?;
+    if fields.values().any(|value| value.len() != length) {
+        return Err(Error::Malformed { field });
+    }
+    Ok(fields)
+}
+
 fn field_key(type_value: u64, key: &[u8]) -> raw::Key {
     raw::Key {
         type_value,
@@ -528,6 +600,44 @@ mod tests {
     }
 
     #[test]
+    fn bip445_fields_round_trip_and_check_lengths() {
+        let mut signed = input();
+        signed
+            .add_frost_pub_nonce(&[3; 33], &[2; 33], &[7; 66])
+            .unwrap();
+        signed
+            .add_frost_partial_sig(&[3; 33], &[2; 33], &[8; 32])
+            .unwrap();
+        assert_eq!(
+            signed.frost_pub_nonces().unwrap(),
+            BTreeMap::from([(([3; 33], [2; 33]), vec![7; 66])])
+        );
+        assert_eq!(
+            signed.frost_partial_sigs().unwrap(),
+            BTreeMap::from([(([3; 33], [2; 33]), vec![8; 32])])
+        );
+        assert!(signed.frost_commitments().unwrap().is_empty());
+
+        let key = [[4; 33], [2; 33]].concat();
+        let mut short_nonce = input();
+        short_nonce
+            .unknowns
+            .insert(field_key(PSBT_IN_FROST_PUB_NONCE, &key), vec![7; 65]);
+        assert!(matches!(
+            short_nonce.frost_pub_nonces(),
+            Err(Error::Malformed { .. })
+        ));
+        let mut long_sig = input();
+        long_sig
+            .unknowns
+            .insert(field_key(PSBT_IN_FROST_PARTIAL_SIG, &key), vec![8; 33]);
+        assert!(matches!(
+            long_sig.frost_partial_sigs(),
+            Err(Error::Malformed { .. })
+        ));
+    }
+
+    #[test]
     fn ignores_unrelated_unknown_fields() {
         let mut input = input();
         input.unknowns.insert(
@@ -560,6 +670,8 @@ mod tests {
         for (key_type, expected) in [
             (PSBT_IN_FROST_THRESHOLD_INFO, "PSBT_IN_FROST_THRESHOLD_INFO"),
             (PSBT_IN_FROST_SIGNER_SET, "PSBT_IN_FROST_SIGNER_SET"),
+            (PSBT_IN_FROST_PUB_NONCE, "PSBT_IN_FROST_PUB_NONCE"),
+            (PSBT_IN_FROST_PARTIAL_SIG, "PSBT_IN_FROST_PARTIAL_SIG"),
             (
                 PSBT_IN_FROST_RFC9591_COMMITMENT,
                 "PSBT_IN_FROST_RFC9591_COMMITMENT",
@@ -575,6 +687,6 @@ mod tests {
         ] {
             assert_eq!(field_name(key_type), Some(expected));
         }
-        assert_eq!(field_name(0x32), None);
+        assert_eq!(field_name(0x36), None);
     }
 }

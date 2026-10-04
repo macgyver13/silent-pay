@@ -9,15 +9,22 @@ use rand::{CryptoRng, RngCore};
 use secp256k1::{PublicKey, Secp256k1};
 use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 
+use crate::bip445_spdk;
 use crate::derivation::{derive_public, DerivedPublic};
 use crate::frost_psbt::FrostInputExt;
 use crate::frost_spdk::{self, Round1Secret};
-use crate::wallet::{PublicWalletFile, ShareFile};
+use crate::wallet::{PublicWalletFile, Scheme, ShareFile};
 use crate::workflow;
+
+/// A companion's in-memory round-one secret for its wallet's scheme.
+enum PendingSecret {
+    Rfc9591(Round1Secret),
+    Bip445(bip445_spdk::Round1Secret),
+}
 
 pub struct PendingRoundOne {
     initial: Psbt,
-    secret: Round1Secret,
+    secret: PendingSecret,
     key: frost::keys::KeyPackage,
     public: DerivedPublic,
     recipients: Vec<SilentPaymentAddress>,
@@ -86,13 +93,23 @@ impl Companion {
         )?;
         let recipients = recipients(initial)?;
         let mut contribution = initial.clone();
-        let secret = workflow::contribute(
-            &Secp256k1::new(),
-            &mut contribution,
-            &root_key,
-            &public,
-            rng,
-        )?;
+        let secp = Secp256k1::new();
+        let secret = match self.share.scheme {
+            Scheme::Rfc9591 => PendingSecret::Rfc9591(workflow::contribute(
+                &secp,
+                &mut contribution,
+                &root_key,
+                &public,
+                rng,
+            )?),
+            Scheme::Bip445 => PendingSecret::Bip445(workflow::contribute_bip445(
+                &secp,
+                &mut contribution,
+                &root_key,
+                &public,
+                rng,
+            )?),
+        };
         self.pending = Some(PendingRoundOne {
             initial: initial.clone(),
             secret,
@@ -116,17 +133,31 @@ impl Companion {
                 bail!("this companion was not selected by the signing PSBT");
             }
             let mut contribution = signing.clone();
-            let sighash = workflow::compute_sighash(&contribution)?;
-            let package = workflow::signing_package(&contribution, &sighash, &pending.public)?;
-            workflow::partial_sign(
-                &Secp256k1::new(),
-                &mut contribution,
-                &package,
-                pending.secret,
-                &pending.key,
-                &pending.public,
-                &pending.recipients,
-            )?;
+            let secp = Secp256k1::new();
+            match pending.secret {
+                PendingSecret::Rfc9591(secret) => {
+                    let sighash = workflow::compute_sighash(&contribution)?;
+                    let package =
+                        workflow::signing_package(&contribution, &sighash, &pending.public)?;
+                    workflow::partial_sign(
+                        &secp,
+                        &mut contribution,
+                        &package,
+                        secret,
+                        &pending.key,
+                        &pending.public,
+                        &pending.recipients,
+                    )?;
+                }
+                PendingSecret::Bip445(secret) => workflow::partial_sign_bip445(
+                    &secp,
+                    &mut contribution,
+                    secret,
+                    &pending.key,
+                    &pending.public,
+                    &pending.recipients,
+                )?,
+            }
             Ok(contribution)
         })();
         // The nonce is consumed on every signing attempt. This deliberately
@@ -189,8 +220,9 @@ pub fn collect_round_one(
         validate_transaction_shape(initial, contribution)?;
         combined = combined.combine_with(contribution.clone())?;
     }
-    if combined.inputs[0].frost_commitments()?.len() != 2 {
-        bail!("round one must contain exactly two distinct commitments");
+    let input = &combined.inputs[0];
+    if input.frost_commitments()?.len() + input.frost_pub_nonces()?.len() != 2 {
+        bail!("round one must contain exactly two distinct round-one nonces");
     }
     let public = authenticated_public(wallet, &combined)?;
     workflow::derive_sp_outputs(&Secp256k1::new(), &mut combined, &public)?;
@@ -206,7 +238,8 @@ pub fn collect_round_two(signing: &Psbt, contributions: &[Psbt]) -> Result<Psbt>
         validate_transaction_shape(signing, contribution)?;
         combined = combined.combine_with(contribution.clone())?;
     }
-    if combined.inputs[0].frost_signature_shares()?.len() != 2 {
+    let input = &combined.inputs[0];
+    if input.frost_signature_shares()?.len() + input.frost_partial_sigs()?.len() != 2 {
         bail!("round two must contain exactly two distinct signature shares");
     }
     Ok(combined)
@@ -214,9 +247,14 @@ pub fn collect_round_two(signing: &Psbt, contributions: &[Psbt]) -> Result<Psbt>
 
 pub fn finalize(wallet: &PublicWalletFile, psbt: &mut Psbt) -> Result<Transaction> {
     let public = authenticated_public(wallet, psbt)?;
-    let sighash = workflow::compute_sighash(psbt)?;
-    let package = workflow::signing_package(psbt, &sighash, &public)?;
-    workflow::aggregate_and_extract(psbt, &package, &public)
+    match wallet.scheme {
+        Scheme::Rfc9591 => {
+            let sighash = workflow::compute_sighash(psbt)?;
+            let package = workflow::signing_package(psbt, &sighash, &public)?;
+            workflow::aggregate_and_extract(psbt, &package, &public)
+        }
+        Scheme::Bip445 => workflow::aggregate_and_extract_bip445(psbt, &public),
+    }
 }
 
 fn authenticated_public(wallet: &PublicWalletFile, psbt: &Psbt) -> Result<DerivedPublic> {
@@ -406,8 +444,14 @@ mod tests {
 
     #[test]
     fn full_file_equivalent_flow_for_every_subset() {
+        for scheme in [Scheme::Rfc9591, Scheme::Bip445] {
+            full_flow_for_every_subset(scheme);
+        }
+    }
+
+    fn full_flow_for_every_subset(scheme: Scheme) {
         let directory = std::env::temp_dir().join(format!("frost-flow-{}", rand::random::<u64>()));
-        let (wallet_path, shares) = wallet::provision(&directory).unwrap();
+        let (wallet_path, shares) = wallet::provision(&directory, scheme).unwrap();
         let wallet = PublicWalletFile::load(wallet_path).unwrap();
         for subset in [[0, 1], [0, 2], [1, 2]] {
             let initial = create_initial(&wallet, 7, Amount::from_sat(90_000)).unwrap();
@@ -426,6 +470,18 @@ mod tests {
                 .iter_mut()
                 .map(|companion| companion.round_two(&signing).unwrap())
                 .collect::<Vec<_>>();
+            // Each scheme uses only its own nonce and signature fields.
+            let (signing_input, signed_input) = (&signing.inputs[0], &round_two[0].inputs[0]);
+            let counts = (
+                signing_input.frost_commitments().unwrap().len(),
+                signing_input.frost_pub_nonces().unwrap().len(),
+                signed_input.frost_signature_shares().unwrap().len(),
+                signed_input.frost_partial_sigs().unwrap().len(),
+            );
+            match scheme {
+                Scheme::Rfc9591 => assert_eq!(counts, (2, 0, 1, 0)),
+                Scheme::Bip445 => assert_eq!(counts, (0, 2, 0, 1)),
+            }
             assert!(companions
                 .iter()
                 .all(|companion| !companion.has_active_nonce()));
@@ -482,7 +538,7 @@ mod tests {
                         expected.x_only_public_key().0
                     )
                 ),
-                "recipient cannot find the payment for subset {subset:?}"
+                "recipient cannot find the {scheme:?} payment for subset {subset:?}"
             );
         }
         std::fs::remove_dir_all(directory).unwrap();
@@ -490,8 +546,14 @@ mod tests {
 
     #[test]
     fn nonce_is_consumed_after_every_round_two_attempt() {
+        for scheme in [Scheme::Rfc9591, Scheme::Bip445] {
+            nonce_is_consumed(scheme);
+        }
+    }
+
+    fn nonce_is_consumed(scheme: Scheme) {
         let directory = std::env::temp_dir().join(format!("frost-nonce-{}", rand::random::<u64>()));
-        let (wallet_path, shares) = wallet::provision(&directory).unwrap();
+        let (wallet_path, shares) = wallet::provision(&directory, scheme).unwrap();
         let wallet = PublicWalletFile::load(wallet_path).unwrap();
         let first = create_initial(&wallet, 1, Amount::from_sat(50_000)).unwrap();
         let second = create_initial(&wallet, 1, Amount::from_sat(50_000)).unwrap();
@@ -510,7 +572,7 @@ mod tests {
     fn initial_psbt_has_no_frost_global_fields() {
         let directory =
             std::env::temp_dir().join(format!("frost-no-globals-{}", rand::random::<u64>()));
-        let (wallet_path, _) = wallet::provision(&directory).unwrap();
+        let (wallet_path, _) = wallet::provision(&directory, Scheme::Rfc9591).unwrap();
         let wallet = PublicWalletFile::load(wallet_path).unwrap();
         let psbt = create_initial(&wallet, 7, Amount::from_sat(50_000)).unwrap();
 
@@ -531,7 +593,7 @@ mod tests {
     fn companion_file_names_include_the_round_and_share_identifier() {
         let directory =
             std::env::temp_dir().join(format!("frost-file-names-{}", rand::random::<u64>()));
-        let (_, shares) = wallet::provision(&directory).unwrap();
+        let (_, shares) = wallet::provision(&directory, Scheme::Rfc9591).unwrap();
         let companion = Companion::load(&shares[1]).unwrap();
         assert_eq!(
             companion.round_one_file(),

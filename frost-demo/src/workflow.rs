@@ -19,6 +19,7 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 
+use crate::bip445_spdk;
 use crate::derivation::DerivedPublic;
 use crate::frost_spdk::{self, Round1Secret};
 
@@ -200,6 +201,29 @@ pub fn contribute<R: RngCore + rand::CryptoRng>(
     public: &DerivedPublic,
     rng: &mut R,
 ) -> Result<Round1Secret> {
+    add_ecdh_shares(secp, psbt, root_key, public, rng)?;
+    frost_spdk::commit(&mut psbt.inputs[0], root_key, public, rng)
+}
+
+/// BIP445 round one for one selected signer: public nonce plus ECDH/DLEQ shares.
+pub fn contribute_bip445<R: RngCore + rand::CryptoRng>(
+    secp: &Secp256k1<secp256k1::All>,
+    psbt: &mut Psbt,
+    root_key: &frost::keys::KeyPackage,
+    public: &DerivedPublic,
+    rng: &mut R,
+) -> Result<bip445_spdk::Round1Secret> {
+    add_ecdh_shares(secp, psbt, root_key, public, rng)?;
+    bip445_spdk::commit(&mut psbt.inputs[0], root_key, public, rng)
+}
+
+fn add_ecdh_shares<R: RngCore + rand::CryptoRng>(
+    secp: &Secp256k1<secp256k1::All>,
+    psbt: &mut Psbt,
+    root_key: &frost::keys::KeyPackage,
+    public: &DerivedPublic,
+    rng: &mut R,
+) -> Result<()> {
     let scan_keys: Vec<_> = psbt
         .outputs
         .iter()
@@ -222,7 +246,7 @@ pub fn contribute<R: RngCore + rand::CryptoRng>(
             aux_rand,
         )?;
     }
-    frost_spdk::commit(&mut psbt.inputs[0], root_key, public, rng)
+    Ok(())
 }
 
 pub fn derive_sp_outputs(
@@ -259,9 +283,7 @@ pub fn partial_sign(
     public: &DerivedPublic,
     expected_recipients: &[SilentPaymentAddress],
 ) -> Result<()> {
-    verify_recipients(psbt, expected_recipients)?;
-    frost_spdk::verify_sp_outputs(secp, psbt, public)?;
-    frost_spdk::verify_participant_tags(psbt, &public.root)?;
+    verify_before_signing(secp, psbt, public, expected_recipients)?;
     let expected = compute_sighash(psbt)?;
     if signing_package.message() != expected.as_slice() {
         return Err(anyhow!(
@@ -275,6 +297,32 @@ pub fn partial_sign(
         root_key,
         public,
     )
+}
+
+/// BIP445 round two: check the PSBT, then sign its sighash.
+pub fn partial_sign_bip445(
+    secp: &Secp256k1<secp256k1::All>,
+    psbt: &mut Psbt,
+    secret: bip445_spdk::Round1Secret,
+    root_key: &frost::keys::KeyPackage,
+    public: &DerivedPublic,
+    expected_recipients: &[SilentPaymentAddress],
+) -> Result<()> {
+    verify_before_signing(secp, psbt, public, expected_recipients)?;
+    let sighash = compute_sighash(psbt)?;
+    bip445_spdk::sign(&mut psbt.inputs[0], secret, root_key, public, &sighash)
+}
+
+/// Checks a signer makes on its own key material before any signature share.
+fn verify_before_signing(
+    secp: &Secp256k1<secp256k1::All>,
+    psbt: &Psbt,
+    public: &DerivedPublic,
+    expected_recipients: &[SilentPaymentAddress],
+) -> Result<()> {
+    verify_recipients(psbt, expected_recipients)?;
+    frost_spdk::verify_sp_outputs(secp, psbt, public)?;
+    frost_spdk::verify_participant_tags(psbt, &public.root)
 }
 
 /// Confirm every Silent Payment output pays a recipient the signer authorized.
@@ -309,7 +357,21 @@ pub fn aggregate_and_extract(
     let bytes = signature
         .serialize()
         .context("serialize aggregate FROST signature")?;
-    let schnorr = secp256k1::schnorr::Signature::from_slice(&bytes)
+    finish(psbt, &bytes)
+}
+
+pub fn aggregate_and_extract_bip445(
+    psbt: &mut Psbt,
+    public: &DerivedPublic,
+) -> Result<Transaction> {
+    let sighash = compute_sighash(psbt)?;
+    let signature = bip445_spdk::aggregate(&psbt.inputs[0], public, &sighash)?;
+    finish(psbt, &signature)
+}
+
+/// Attach the aggregate BIP340 signature, finalize, and extract.
+fn finish(psbt: &mut Psbt, signature: &[u8]) -> Result<Transaction> {
+    let schnorr = secp256k1::schnorr::Signature::from_slice(signature)
         .context("convert aggregate FROST signature")?;
     psbt.inputs[0].tap_key_sig = Some(bitcoin::taproot::Signature {
         signature: schnorr,

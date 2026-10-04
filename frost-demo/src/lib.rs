@@ -1,4 +1,5 @@
 pub mod bip445;
+pub mod bip445_spdk;
 pub mod derivation;
 pub mod ecdh;
 pub mod frost_psbt;
