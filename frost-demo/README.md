@@ -35,7 +35,10 @@ The transaction builder currently uses the example's single synthetic prevout, o
 Silent Payment recipient, a 1,000 sat fee, and 9,000 sat change. It demonstrates the complete PSBT
 and threshold cryptographic flow but is intentionally not a broadcast wallet.
 
-FROST fields use the provisional top-level keytypes from `bip375-examples`: input configuration
-`0x30`, commitments `0x31`, signature shares `0x32`, verifying shares `0x33`, and output participant
-shares `0x20`. FROST child keys are discovered and authenticated through the standard Taproot
-BIP32 derivation fields; the demo does not define any FROST global keytypes.
+FROST fields use provisional top-level keytypes laid out like BIP373. The input carries the root
+threshold info `0x30` (keyed by the threshold public key: `t`, then each BIP445 identifier and public
+share) and the coordinator's signer set `0x31`. RFC 9591 commitments `0x34` and signature shares
+`0x35` are keyed by public share plus threshold public key; `0x32`/`0x33` are left for BIP445 nonces
+and partial signatures. Change outputs carry the same threshold info as `0x20`. FROST child keys
+are discovered and authenticated through the standard Taproot BIP32 derivation fields; the demo
+does not define any FROST global keytypes.

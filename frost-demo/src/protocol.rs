@@ -11,7 +11,7 @@ use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 
 use crate::derivation::{derive_public, DerivedPublic};
 use crate::frost_psbt::FrostInputExt;
-use crate::frost_spdk::Round1Secret;
+use crate::frost_spdk::{self, Round1Secret};
 use crate::wallet::{PublicWalletFile, ShareFile};
 use crate::workflow;
 
@@ -109,15 +109,15 @@ impl Companion {
         )?;
         let result = (|| {
             validate_session_intent(&pending.initial, signing)?;
-            let commitments = signing.inputs[0].frost_commitments()?;
-            let identifier = pending.key.identifier().serialize();
-            if !commitments.contains_key(&identifier) {
+            let (_, signers) = signing.inputs[0]
+                .frost_signer_set()?
+                .context("missing FROST signer set")?;
+            if !signers.contains(&frost_spdk::psbt_identifier(*pending.key.identifier())?) {
                 bail!("this companion was not selected by the signing PSBT");
             }
             let mut contribution = signing.clone();
             let sighash = workflow::compute_sighash(&contribution)?;
-            let package =
-                workflow::signing_package(&contribution, &sighash, &pending.public.derived)?;
+            let package = workflow::signing_package(&contribution, &sighash, &pending.public)?;
             workflow::partial_sign(
                 &Secp256k1::new(),
                 &mut contribution,
@@ -146,7 +146,7 @@ pub fn create_initial(
     let change_public = derive_public(&root, &[1, receive_index])?.derived;
     let setup = workflow::setup_public(derived)?;
     let change_setup = workflow::setup_public(change_public)?;
-    let mut psbt = workflow::construct_psbt(&setup, &[(setup.sp_address, amount)])?;
+    let mut psbt = workflow::construct_psbt(&setup, &root, &[(setup.sp_address, amount)])?;
     let receive_source = (
         wallet.fingerprint()?,
         DerivationPath::from(vec![
@@ -167,9 +167,6 @@ pub fn create_initial(
     for output in &mut psbt.outputs {
         if output.sp_v0_info.is_none() {
             output.script_pubkey = change_setup.p2tr_script.clone();
-            // The provisional participant tag describes the input signing
-            // roster. Change instead uses its standard Taproot key origin.
-            output.unknowns.retain(|key, _| key.type_value != 0x20);
             output
                 .tap_key_origins
                 .insert(change_setup.internal_key, (vec![], change_source.clone()));
@@ -218,41 +215,16 @@ pub fn collect_round_two(signing: &Psbt, contributions: &[Psbt]) -> Result<Psbt>
 pub fn finalize(wallet: &PublicWalletFile, psbt: &mut Psbt) -> Result<Transaction> {
     let public = authenticated_public(wallet, psbt)?;
     let sighash = workflow::compute_sighash(psbt)?;
-    let package = workflow::signing_package(psbt, &sighash, &public.derived)?;
-    workflow::aggregate_and_extract(psbt, &package, &public.derived)
+    let package = workflow::signing_package(psbt, &sighash, &public)?;
+    workflow::aggregate_and_extract(psbt, &package, &public)
 }
 
 fn authenticated_public(wallet: &PublicWalletFile, psbt: &Psbt) -> Result<DerivedPublic> {
     let root = wallet.package()?;
     let path = discover_child_path(psbt, &root, &wallet.root_fingerprint)?;
-    let expected = derive_public(&root, &path)?;
-    let encoded = public_from_psbt(psbt)?;
-    if encoded != expected.derived {
-        bail!("PSBT FROST roster does not match the authenticated coordinator wallet");
-    }
-    Ok(expected)
-}
-
-fn public_from_psbt(psbt: &Psbt) -> Result<frost::keys::PublicKeyPackage> {
-    let config = psbt.inputs[0]
-        .frost_configuration()?
-        .context("missing FROST configuration")?;
-    let verifying_key = frost::VerifyingKey::deserialize(&config.group_verifying_key)?;
-    let shares = psbt.inputs[0]
-        .frost_verifying_shares()?
-        .into_iter()
-        .map(|(id, share)| {
-            Ok((
-                frost::Identifier::deserialize(&id)?,
-                frost::keys::VerifyingShare::deserialize(&share)?,
-            ))
-        })
-        .collect::<Result<_>>()?;
-    Ok(frost::keys::PublicKeyPackage::new(
-        shares,
-        verifying_key,
-        Some(config.min_signers),
-    ))
+    frost_spdk::validate_threshold_info(&psbt.inputs[0], &root)
+        .context("PSBT FROST threshold info does not match the authenticated coordinator wallet")?;
+    derive_public(&root, &path)
 }
 
 fn discover_child_path(
@@ -429,7 +401,6 @@ fn validate_session_intent(initial: &Psbt, signing: &Psbt) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frost_spdk;
     use crate::wallet;
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -464,8 +435,8 @@ mod tests {
                 transaction.input[0].witness.iter().next().unwrap(),
             )
             .unwrap();
-            let public = public_from_psbt(&signed).unwrap();
-            let setup = workflow::setup_public(public.clone()).unwrap();
+            let public = derive_public(&wallet.package().unwrap(), &[0, 7]).unwrap();
+            let setup = workflow::setup_public(public.derived).unwrap();
             Secp256k1::verification_only()
                 .verify_schnorr(
                     &signature,

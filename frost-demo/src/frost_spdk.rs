@@ -17,7 +17,7 @@ use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 
 use crate::derivation::DerivedPublic;
 use crate::ecdh::TweakContext;
-use crate::frost_psbt::{Configuration, FrostInputExt, FrostOutputExt};
+use crate::frost_psbt::{FrostInputExt, FrostOutputExt, PublicShare, ThresholdInfo, ThresholdKey};
 
 /// Construct the base BIP-375 PSBT while the generic upstream builder remains
 /// under its historical `musig2` module name.
@@ -34,50 +34,35 @@ pub struct Round1Secret {
     nonces: frost::round1::SigningNonces,
 }
 
-pub fn configure_input(
-    input: &mut Input,
-    public_key_package: &frost::keys::PublicKeyPackage,
-) -> Result<()> {
-    let min_signers = public_key_package
-        .min_signers()
-        .ok_or_else(|| anyhow!("FROST public key package is missing its threshold"))?;
-    let configuration = Configuration {
-        min_signers,
-        max_signers: public_key_package.max_signers(),
-        group_verifying_key: public_key_package
-            .verifying_key()
-            .serialize()
-            .context("serialize FROST group verifying key")?,
-    };
+/// Write the root threshold info the input is signed under.
+pub fn configure_input(input: &mut Input, root: &frost::keys::PublicKeyPackage) -> Result<()> {
     input
-        .set_frost_configuration(&configuration)
-        .context("set FROST PSBT configuration")?;
-    for (identifier, verifying_share) in public_key_package.verifying_shares() {
-        input
-            .add_frost_verifying_share(
-                &identifier.serialize(),
-                &verifying_share
-                    .serialize()
-                    .context("serialize FROST verifying share")?,
-            )
-            .context("add FROST verifying share")?;
-    }
-    Ok(())
+        .set_frost_threshold_info(&threshold_key(root)?, &threshold_info(root)?)
+        .context("set FROST threshold info")
+}
+
+/// Tag an output that pays the same threshold wallet (change).
+pub fn configure_output(output: &mut Output, root: &frost::keys::PublicKeyPackage) -> Result<()> {
+    output
+        .set_frost_threshold_info(&threshold_key(root)?, &threshold_info(root)?)
+        .context("tag FROST output with threshold info")
 }
 
 /// Generate and publish one signer's round-one commitment.
 pub fn commit<R: RngCore + CryptoRng>(
     input: &mut Input,
-    key_package: &frost::keys::KeyPackage,
-    public_key_package: &frost::keys::PublicKeyPackage,
+    root_key: &frost::keys::KeyPackage,
+    public: &DerivedPublic,
     rng: &mut R,
 ) -> Result<Round1Secret> {
-    validate_key_package(input, key_package, public_key_package)?;
+    validate_key_package(input, root_key, &public.root)?;
+    let key_package = public.key(root_key)?;
     let (nonces, commitments) = frost::round1::commit(key_package.signing_share(), rng);
-    let identifier = *key_package.identifier();
+    let identifier = *root_key.identifier();
     input
         .add_frost_commitment(
-            &identifier.serialize(),
+            &public_share(&public.root, &identifier)?,
+            &threshold_key(&public.root)?,
             &commitments
                 .serialize()
                 .context("serialize FROST signing commitments")?,
@@ -86,39 +71,39 @@ pub fn commit<R: RngCore + CryptoRng>(
     Ok(Round1Secret { identifier, nonces })
 }
 
-/// Build the coordinator package once a threshold of commitments is present.
+/// Coordinator: select every participant that committed as the signer set.
+pub fn select_signers(input: &mut Input, root: &frost::keys::PublicKeyPackage) -> Result<()> {
+    validate_threshold_info(input, root)?;
+    let mut identifiers = parse_commitments(input, root)?
+        .into_keys()
+        .map(psbt_identifier)
+        .collect::<Result<Vec<_>>>()?;
+    identifiers.sort_unstable();
+    let threshold = root
+        .min_signers()
+        .context("FROST public key package is missing its threshold")?;
+    if identifiers.len() < usize::from(threshold) {
+        bail!(
+            "insufficient FROST commitments: got {}, need {threshold}",
+            identifiers.len()
+        );
+    }
+    input
+        .set_frost_signer_set(&threshold_key(root)?, &identifiers)
+        .context("set FROST signer set")
+}
+
+/// Build the signing package for the PSBT's signer set.
 pub fn signing_package(
     input: &Input,
     message: &[u8],
-    public_key_package: &frost::keys::PublicKeyPackage,
+    public: &DerivedPublic,
 ) -> Result<frost::SigningPackage> {
-    validate_public_key_package(input, public_key_package)?;
-    let configuration = input
-        .frost_configuration()
-        .context("parse FROST PSBT configuration")?
-        .ok_or_else(|| anyhow!("missing FROST PSBT configuration"))?;
-    let commitments = parse_commitments(input)?;
-    if commitments.len() < usize::from(configuration.min_signers) {
-        bail!(
-            "insufficient FROST commitments: got {}, need {}",
-            commitments.len(),
-            configuration.min_signers
-        );
-    }
-    if commitments.len() > usize::from(configuration.max_signers) {
-        bail!(
-            "too many FROST commitments: got {}, maximum {}",
-            commitments.len(),
-            configuration.max_signers
-        );
-    }
-    for identifier in commitments.keys() {
-        if !public_key_package
-            .verifying_shares()
-            .contains_key(identifier)
-        {
-            bail!("FROST commitment supplied by an unknown participant");
-        }
+    let selected = signer_set(input, &public.root)?;
+    let mut commitments = parse_commitments(input, &public.root)?;
+    commitments.retain(|identifier, _| selected.contains(identifier));
+    if commitments.len() != selected.len() {
+        bail!("missing FROST commitment for a selected signer");
     }
     Ok(frost::SigningPackage::new(commitments, message))
 }
@@ -128,25 +113,33 @@ pub fn sign(
     input: &mut Input,
     signing_package: &frost::SigningPackage,
     round1_secret: Round1Secret,
-    key_package: &frost::keys::KeyPackage,
-    public_key_package: &frost::keys::PublicKeyPackage,
+    root_key: &frost::keys::KeyPackage,
+    public: &DerivedPublic,
 ) -> Result<()> {
-    validate_key_package(input, key_package, public_key_package)?;
-    if round1_secret.identifier != *key_package.identifier() {
+    validate_key_package(input, root_key, &public.root)?;
+    if round1_secret.identifier != *root_key.identifier() {
         bail!("round-one nonce belongs to a different FROST participant");
     }
     let expected = signing_package
-        .signing_commitment(key_package.identifier())
+        .signing_commitment(root_key.identifier())
         .ok_or_else(|| anyhow!("signer was not selected in the FROST signing package"))?;
     let actual = frost::round1::SigningCommitments::from(&round1_secret.nonces);
     if actual != expected {
         bail!("round-one nonce does not match the published FROST commitment");
     }
-    let share =
-        frost::round2::sign_with_tweak(signing_package, &round1_secret.nonces, key_package, None)
-            .context("create FROST signature share")?;
+    let share = frost::round2::sign_with_tweak(
+        signing_package,
+        &round1_secret.nonces,
+        &public.key(root_key)?,
+        None,
+    )
+    .context("create FROST signature share")?;
     input
-        .add_frost_signature_share(&round1_secret.identifier.serialize(), &share.serialize())
+        .add_frost_signature_share(
+            &public_share(&public.root, &round1_secret.identifier)?,
+            &threshold_key(&public.root)?,
+            &share.serialize(),
+        )
         .context("add FROST signature share")
 }
 
@@ -154,16 +147,15 @@ pub fn sign(
 pub fn aggregate(
     input: &Input,
     signing_package: &frost::SigningPackage,
-    public_key_package: &frost::keys::PublicKeyPackage,
+    public: &DerivedPublic,
 ) -> Result<frost::Signature> {
-    validate_public_key_package(input, public_key_package)?;
-    let encoded_shares = input
-        .frost_signature_shares()
-        .context("parse FROST signature shares")?;
+    validate_threshold_info(input, &public.root)?;
     let mut shares = BTreeMap::new();
-    for (identifier_bytes, share_bytes) in encoded_shares {
-        let identifier = frost::Identifier::deserialize(&identifier_bytes)
-            .context("deserialize FROST signature-share identifier")?;
+    for ((share_key, threshold), share_bytes) in input
+        .frost_signature_shares()
+        .context("parse FROST signature shares")?
+    {
+        let identifier = participant(&public.root, &share_key, &threshold)?;
         if signing_package.signing_commitment(&identifier).is_none() {
             bail!("signature share supplied by an unselected FROST participant");
         }
@@ -178,10 +170,9 @@ pub fn aggregate(
             signing_package.signing_commitments().len()
         );
     }
-    frost::aggregate_with_tweak(signing_package, &shares, public_key_package, None)
+    frost::aggregate_with_tweak(signing_package, &shares, &public.derived, None)
         .context("aggregate FROST signature")
 }
-
 /// Add the BIP-375 ECDH share for one selected FROST participant.
 ///
 /// The existing proposed `PSBT_IN_SP_PARTIAL_ECDH_SHARE` and
@@ -195,13 +186,7 @@ pub fn add_ecdh_share(
     scan_key: &PublicKey,
     aux_rand: [u8; 32],
 ) -> Result<()> {
-    validate_public_key_package(input, &public.derived)?;
-    if root_key.verifying_key() != public.root.verifying_key()
-        || public.root.verifying_shares().get(root_key.identifier())
-            != Some(root_key.verifying_share())
-    {
-        bail!("FROST key package does not match the root threshold key");
-    }
+    validate_key_package(input, root_key, &public.root)?;
     // BIP445 model: the root share is untweaked; derivation and Taproot
     // tweaks are applied at combination time through `gacc`/`tacc` (see
     // `crate::ecdh`).
@@ -246,17 +231,8 @@ pub fn finalize_sp_outputs(
     if psbt.inputs.len() != 1 {
         bail!("frost-signer currently requires exactly one eligible input");
     }
-    validate_public_key_package(&psbt.inputs[0], &public.derived)?;
-    let commitments = parse_commitments(&psbt.inputs[0])?;
-    let configuration = psbt.inputs[0]
-        .frost_configuration()?
-        .ok_or_else(|| anyhow!("missing FROST PSBT configuration"))?;
-    if commitments.len() < usize::from(configuration.min_signers) {
-        bail!("insufficient selected FROST participants for ECDH aggregation");
-    }
-
     let mut selected = BTreeMap::new();
-    for identifier in commitments.keys() {
+    for identifier in &signer_set(&psbt.inputs[0], &public.root)? {
         let verifying_share = public
             .root
             .verifying_shares()
@@ -368,41 +344,26 @@ pub fn verify_sp_outputs(
     Ok(())
 }
 
-/// Validate any FROST participant-share output tags against the known group.
+/// Validate any FROST threshold-info output tags against the known root.
 ///
 /// The tag is advisory: outputs without it are ignored. When present, it must
-/// match the coordinator's `PublicKeyPackage`, so a change output mislabeled
-/// with a foreign participant set is rejected before any share is produced.
-pub fn verify_participant_tags(
-    psbt: &Psbt,
-    public_key_package: &frost::keys::PublicKeyPackage,
-) -> Result<()> {
-    let expected_group = public_key_package
-        .verifying_key()
-        .serialize()
-        .context("serialize FROST group verifying key")?;
-    let mut expected_shares = public_key_package
-        .verifying_shares()
-        .values()
-        .map(|share| share.serialize().context("serialize FROST verifying share"))
-        .collect::<Result<Vec<_>>>()?;
-    expected_shares.sort_unstable();
-
+/// match the caller's own threshold info, so a change output mislabeled with
+/// a foreign participant set is rejected before any share is produced.
+pub fn verify_participant_tags(psbt: &Psbt, root: &frost::keys::PublicKeyPackage) -> Result<()> {
+    let expected = (threshold_key(root)?, threshold_info(root)?);
     for output in &psbt.outputs {
-        let Some((group, mut shares)) = output
-            .frost_participant_shares()
-            .context("parse FROST participant-share tag")?
+        let Some(tag) = output
+            .frost_threshold_info()
+            .context("parse FROST output threshold info")?
         else {
             continue;
         };
-        shares.sort_unstable();
-        if group != expected_group || shares != expected_shares {
-            bail!("FROST participant-share tag does not match the known group");
+        if tag != expected {
+            bail!("FROST output threshold info does not match the known threshold key");
         }
     }
     Ok(())
 }
-
 /// BIP445 tweak context for the address: root threshold key, then the plain
 /// derivation tweaks, then the key-path-only Taproot tweak.
 fn tweak_context(public: &DerivedPublic) -> Result<TweakContext> {
@@ -499,106 +460,160 @@ pub(crate) fn derive_silent_payment_output(
         .context("derive Silent Payment output key")
 }
 
+/// BIP445 identifier for a frost-secp256k1-tr identifier: ZF identifier `k`
+/// sits at x = `k`, BIP445 identifier `id` at x = `id + 1`.
+pub fn psbt_identifier(identifier: frost::Identifier) -> Result<u8> {
+    let bytes = identifier.serialize();
+    match bytes.split_last() {
+        Some((&last, rest)) if last != 0 && rest.iter().all(|byte| *byte == 0) => Ok(last - 1),
+        _ => bail!("FROST identifier has no BIP445 equivalent"),
+    }
+}
+
+fn frost_identifier(identifier: u8) -> Result<frost::Identifier> {
+    frost::Identifier::try_from(u16::from(identifier) + 1).context("invalid BIP445 identifier")
+}
+
+fn threshold_key(root: &frost::keys::PublicKeyPackage) -> Result<ThresholdKey> {
+    root.verifying_key()
+        .serialize()
+        .context("serialize FROST threshold key")?
+        .try_into()
+        .map_err(|_| anyhow!("FROST threshold key is not compressed"))
+}
+
+fn public_share(
+    root: &frost::keys::PublicKeyPackage,
+    identifier: &frost::Identifier,
+) -> Result<PublicShare> {
+    root.verifying_shares()
+        .get(identifier)
+        .context("FROST participant is not in the threshold info")?
+        .serialize()
+        .context("serialize FROST public share")?
+        .try_into()
+        .map_err(|_| anyhow!("FROST public share is not compressed"))
+}
+
+fn threshold_info(root: &frost::keys::PublicKeyPackage) -> Result<ThresholdInfo> {
+    let threshold = root
+        .min_signers()
+        .context("FROST public key package is missing its threshold")?;
+    Ok(ThresholdInfo {
+        threshold: u8::try_from(threshold).context("FROST threshold exceeds 255")?,
+        public_shares: root
+            .verifying_shares()
+            .keys()
+            .map(|identifier| {
+                Ok((
+                    psbt_identifier(*identifier)?,
+                    public_share(root, identifier)?,
+                ))
+            })
+            .collect::<Result<_>>()?,
+    })
+}
+
+/// Map a `(public share, threshold key)` field key to its participant.
+fn participant(
+    root: &frost::keys::PublicKeyPackage,
+    share: &PublicShare,
+    threshold: &ThresholdKey,
+) -> Result<frost::Identifier> {
+    if *threshold != threshold_key(root)? {
+        bail!("FROST field belongs to a different threshold key");
+    }
+    for identifier in root.verifying_shares().keys() {
+        if public_share(root, identifier)? == *share {
+            return Ok(*identifier);
+        }
+    }
+    bail!("FROST field supplied by an unknown participant")
+}
+
+/// The coordinator-selected signers, checked against the known threshold info.
+fn signer_set(
+    input: &Input,
+    root: &frost::keys::PublicKeyPackage,
+) -> Result<Vec<frost::Identifier>> {
+    validate_threshold_info(input, root)?;
+    let (key, identifiers) = input
+        .frost_signer_set()
+        .context("parse FROST signer set")?
+        .context("missing FROST signer set")?;
+    if key != threshold_key(root)? {
+        bail!("FROST signer set belongs to a different threshold key");
+    }
+    let selected = identifiers
+        .into_iter()
+        .map(frost_identifier)
+        .collect::<Result<Vec<_>>>()?;
+    if selected
+        .iter()
+        .any(|identifier| !root.verifying_shares().contains_key(identifier))
+    {
+        bail!("FROST signer set names an unknown participant");
+    }
+    let threshold = root
+        .min_signers()
+        .context("FROST public key package is missing its threshold")?;
+    if selected.len() < usize::from(threshold) {
+        bail!("FROST signer set is below the threshold");
+    }
+    Ok(selected)
+}
+
 fn parse_commitments(
     input: &Input,
+    root: &frost::keys::PublicKeyPackage,
 ) -> Result<BTreeMap<frost::Identifier, frost::round1::SigningCommitments>> {
-    let encoded = input
-        .frost_commitments()
-        .context("parse FROST signing commitments")?;
     let mut commitments = BTreeMap::new();
-    for (identifier_bytes, commitment_bytes) in encoded {
-        let identifier = frost::Identifier::deserialize(&identifier_bytes)
-            .context("deserialize FROST commitment identifier")?;
-        let commitment = frost::round1::SigningCommitments::deserialize(&commitment_bytes)
+    for ((share, threshold), bytes) in input
+        .frost_commitments()
+        .context("parse FROST signing commitments")?
+    {
+        let commitment = frost::round1::SigningCommitments::deserialize(&bytes)
             .context("deserialize FROST signing commitment")?;
-        commitments.insert(identifier, commitment);
+        commitments.insert(participant(root, &share, &threshold)?, commitment);
     }
     Ok(commitments)
 }
 
-fn parse_verifying_shares(
-    input: &Input,
-) -> Result<BTreeMap<frost::Identifier, frost::keys::VerifyingShare>> {
-    let encoded = input
-        .frost_verifying_shares()
-        .context("parse FROST verifying shares")?;
-    let mut verifying_shares = BTreeMap::new();
-    for (identifier_bytes, share_bytes) in encoded {
-        let identifier = frost::Identifier::deserialize(&identifier_bytes)
-            .context("deserialize FROST verifying-share identifier")?;
-        let verifying_share = frost::keys::VerifyingShare::deserialize(&share_bytes)
-            .context("deserialize FROST verifying share")?;
-        verifying_shares.insert(identifier, verifying_share);
-    }
-    Ok(verifying_shares)
-}
-
 fn validate_key_package(
     input: &Input,
-    key_package: &frost::keys::KeyPackage,
-    public_key_package: &frost::keys::PublicKeyPackage,
+    root_key: &frost::keys::KeyPackage,
+    root: &frost::keys::PublicKeyPackage,
 ) -> Result<()> {
-    validate_public_key_package(input, public_key_package)?;
-    let configuration = input
-        .frost_configuration()
-        .context("parse FROST PSBT configuration")?
-        .ok_or_else(|| anyhow!("missing FROST PSBT configuration"))?;
-    let verifying_key = key_package
-        .verifying_key()
-        .serialize()
-        .context("serialize signer FROST verifying key")?;
-    if verifying_key != configuration.group_verifying_key {
-        bail!("FROST key package does not match the PSBT group verifying key");
-    }
-    if *key_package.min_signers() != configuration.min_signers {
-        bail!("FROST key package threshold does not match the PSBT configuration");
-    }
-    if public_key_package
-        .verifying_shares()
-        .get(key_package.identifier())
-        != Some(key_package.verifying_share())
+    validate_threshold_info(input, root)?;
+    if root_key.verifying_key() != root.verifying_key()
+        || Some(*root_key.min_signers()) != root.min_signers()
+        || root.verifying_shares().get(root_key.identifier()) != Some(root_key.verifying_share())
     {
-        bail!("FROST key package does not match the PSBT verifying-share roster");
+        bail!("FROST key package does not match the root threshold info");
     }
     Ok(())
 }
 
-fn validate_public_key_package(
-    input: &Input,
-    public_key_package: &frost::keys::PublicKeyPackage,
-) -> Result<()> {
-    let configuration = input
-        .frost_configuration()
-        .context("parse FROST PSBT configuration")?
-        .ok_or_else(|| anyhow!("missing FROST PSBT configuration"))?;
-    let verifying_key = public_key_package
-        .verifying_key()
-        .serialize()
-        .context("serialize coordinator FROST verifying key")?;
-    let verifying_shares = parse_verifying_shares(input)?;
-    if verifying_key != configuration.group_verifying_key
-        || public_key_package.min_signers() != Some(configuration.min_signers)
-        || public_key_package.max_signers() != configuration.max_signers
-        || verifying_shares.len() != usize::from(configuration.max_signers)
-        || &verifying_shares != public_key_package.verifying_shares()
+/// The PSBT must carry exactly the threshold info the caller already holds.
+pub fn validate_threshold_info(input: &Input, root: &frost::keys::PublicKeyPackage) -> Result<()> {
+    let expected = (threshold_key(root)?, threshold_info(root)?);
+    if input
+        .frost_threshold_info()
+        .context("parse FROST threshold info")?
+        != Some(expected)
     {
-        bail!("FROST public key package does not match the PSBT configuration and roster");
+        bail!("PSBT FROST threshold info does not match the known threshold key");
     }
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::derivation::derive_public;
-    use crate::frost_psbt::{
-        PSBT_IN_FROST_CONFIGURATION, PSBT_IN_FROST_PARTICIPANT_COMMITMENT,
-        PSBT_IN_FROST_VERIFYING_SHARE,
-    };
+    use crate::frost_psbt::{PSBT_IN_FROST_RFC9591_COMMITMENT, PSBT_IN_FROST_THRESHOLD_INFO};
     use bitcoin::hashes::Hash;
     use bitcoin::{OutPoint, Txid};
     use frost::keys::Tweak;
-    use psbt_v2::raw;
     use rand::{rngs::StdRng, SeedableRng};
 
     fn input() -> Input {
@@ -629,154 +644,188 @@ mod tests {
         (keys, public)
     }
 
+    fn verify(public: &DerivedPublic, message: &[u8], signature: &frost::Signature) {
+        public
+            .derived
+            .clone()
+            .tweak::<&[u8]>(None)
+            .verifying_key()
+            .verify(message, signature)
+            .unwrap();
+    }
+
     #[test]
     fn every_two_of_three_subset_signs_in_any_order() {
-        let (keys, public) = packages();
+        let (keys, root) = packages();
+        let public = derive_public(&root, &[0, 5]).unwrap();
         let keys: Vec<_> = keys.values().collect();
         for (case, pair) in [[0, 1], [0, 2], [1, 2]].into_iter().enumerate() {
             let mut input = input();
-            configure_input(&mut input, &public).unwrap();
+            configure_input(&mut input, &root).unwrap();
             let mut rng = StdRng::seed_from_u64(8 + case as u64);
             let mut selected = Vec::new();
             for index in pair {
                 let key = keys[index];
                 selected.push((key, commit(&mut input, key, &public, &mut rng).unwrap()));
             }
+            select_signers(&mut input, &root).unwrap();
             let message = [42 + case as u8; 32];
             let package = signing_package(&input, &message, &public).unwrap();
             for (key, secret) in selected.into_iter().rev() {
                 sign(&mut input, &package, secret, key, &public).unwrap();
             }
             let signature = aggregate(&input, &package, &public).unwrap();
-            let tweaked = public.clone().tweak::<&[u8]>(None);
-            tweaked
-                .verifying_key()
-                .verify(&message, &signature)
-                .unwrap();
+            verify(&public, &message, &signature);
         }
     }
 
     #[test]
     fn rejects_fewer_than_threshold_commitments() {
-        let (keys, public) = packages();
+        let (keys, root) = packages();
+        let public = DerivedPublic::underived(root.clone());
         let mut input = input();
-        configure_input(&mut input, &public).unwrap();
+        configure_input(&mut input, &root).unwrap();
         let mut rng = StdRng::seed_from_u64(9);
         commit(&mut input, keys.values().next().unwrap(), &public, &mut rng).unwrap();
+        assert!(select_signers(&mut input, &root).is_err());
         assert!(signing_package(&input, &[1; 32], &public).is_err());
     }
 
     #[test]
-    fn configure_input_writes_complete_verifying_share_roster() {
-        let (_, public) = packages();
+    fn signer_set_selects_who_signs() {
+        let (keys, root) = packages();
+        let public = DerivedPublic::underived(root.clone());
+        let threshold = threshold_key(&root).unwrap();
         let mut input = input();
-        configure_input(&mut input, &public).unwrap();
+        configure_input(&mut input, &root).unwrap();
+        let mut rng = StdRng::seed_from_u64(10);
+        let mut secrets = keys
+            .values()
+            .map(|key| commit(&mut input, key, &public, &mut rng).unwrap())
+            .collect::<Vec<_>>();
 
-        let expected = public
-            .verifying_shares()
-            .iter()
-            .map(|(identifier, share)| {
-                (identifier.serialize().to_vec(), share.serialize().unwrap())
-            })
-            .collect::<BTreeMap<_, _>>();
-        assert_eq!(input.frost_verifying_shares().unwrap(), expected);
-        assert_eq!(
-            parse_verifying_shares(&input).unwrap(),
-            *public.verifying_shares()
+        for (identifiers, valid) in [(&[0][..], false), (&[0, 7][..], false), (&[0, 2][..], true)] {
+            let mut candidate = input.clone();
+            candidate
+                .set_frost_signer_set(&threshold, identifiers)
+                .unwrap();
+            assert_eq!(
+                signing_package(&candidate, &[1; 32], &public).is_ok(),
+                valid,
+                "{identifiers:?}"
+            );
+        }
+
+        input.set_frost_signer_set(&threshold, &[0, 2]).unwrap();
+        let message = [3; 32];
+        let package = signing_package(&input, &message, &public).unwrap();
+        assert_eq!(package.signing_commitments().len(), 2);
+        let keys: Vec<_> = keys.values().collect();
+        let charlie = secrets.pop().unwrap();
+        let bob = secrets.pop().unwrap();
+        let alice = secrets.pop().unwrap();
+        assert!(sign(&mut input.clone(), &package, bob, keys[1], &public).is_err());
+        sign(&mut input, &package, alice, keys[0], &public).unwrap();
+        sign(&mut input, &package, charlie, keys[2], &public).unwrap();
+        verify(
+            &public,
+            &message,
+            &aggregate(&input, &package, &public).unwrap(),
         );
     }
 
     #[test]
-    fn rejects_incomplete_extra_swapped_and_mismatched_rosters() {
-        let (keys, public) = packages();
-        let mut configured = input();
-        configure_input(&mut configured, &public).unwrap();
-        let roster_keys = configured
-            .unknowns
+    fn identifiers_map_to_bip445() {
+        let (keys, root) = packages();
+        let identifiers = keys
             .keys()
-            .filter(|key| key.type_value == PSBT_IN_FROST_VERIFYING_SHARE)
-            .cloned()
+            .map(|identifier| psbt_identifier(*identifier).unwrap())
             .collect::<Vec<_>>();
+        assert_eq!(identifiers, [0, 1, 2]);
+        for identifier in keys.keys() {
+            let bip445 = psbt_identifier(*identifier).unwrap();
+            assert_eq!(frost_identifier(bip445).unwrap(), *identifier);
+            assert_eq!(
+                threshold_info(&root).unwrap().public_shares[&bip445],
+                public_share(&root, identifier).unwrap()
+            );
+        }
+        let custom = frost::Identifier::deserialize(&[0x1a; 32]).unwrap();
+        assert!(psbt_identifier(custom).is_err());
+    }
 
-        let mut missing = configured.clone();
-        missing.unknowns.remove(&roster_keys[0]);
-        assert!(validate_public_key_package(&missing, &public).is_err());
+    #[test]
+    fn rejects_threshold_info_that_differs_from_own() {
+        let (keys, root) = packages();
+        let (foreign_keys, foreign_root) = packages_with_seed(17);
+        let mut configured = input();
+        configure_input(&mut configured, &root).unwrap();
+        validate_threshold_info(&configured, &root).unwrap();
 
-        let (foreign_keys, foreign_public) = packages_with_seed(17);
-        let foreign_share = foreign_public
-            .verifying_shares()
-            .values()
-            .next()
-            .unwrap()
-            .serialize()
-            .unwrap();
-        let mut extra = configured.clone();
-        extra.unknowns.insert(
-            raw::Key {
-                type_value: PSBT_IN_FROST_VERIFYING_SHARE,
-                key: frost::Identifier::try_from(4_u16)
-                    .unwrap()
-                    .serialize()
-                    .to_vec(),
-            },
-            foreign_share.clone(),
-        );
-        assert!(validate_public_key_package(&extra, &public).is_err());
+        let key = threshold_key(&root).unwrap();
+        let info = threshold_info(&root).unwrap();
+        let foreign_share = threshold_info(&foreign_root).unwrap().public_shares[&0];
+        let mut missing = info.clone();
+        missing.public_shares.remove(&2);
+        let mut extra = info.clone();
+        extra.public_shares.insert(3, foreign_share);
+        let mut swapped = info.clone();
+        let first = swapped.public_shares[&0];
+        let second = swapped.public_shares[&1];
+        swapped.public_shares.insert(0, second);
+        swapped.public_shares.insert(1, first);
+        let mut substituted = info.clone();
+        substituted.public_shares.insert(0, foreign_share);
+        let raised = ThresholdInfo {
+            threshold: 3,
+            ..info.clone()
+        };
+        for (threshold_key, info) in [
+            (key, missing),
+            (key, extra),
+            (key, swapped.clone()),
+            (key, substituted),
+            (key, raised),
+            (threshold_key(&foreign_root).unwrap(), info),
+        ] {
+            let mut tampered = input();
+            tampered
+                .set_frost_threshold_info(&threshold_key, &info)
+                .unwrap();
+            assert!(validate_threshold_info(&tampered, &root).is_err());
+        }
 
-        let mut swapped = configured.clone();
-        let first = swapped.unknowns[&roster_keys[0]].clone();
-        let second = swapped.unknowns[&roster_keys[1]].clone();
-        swapped.unknowns.insert(roster_keys[0].clone(), second);
-        swapped.unknowns.insert(roster_keys[1].clone(), first);
-        assert!(validate_public_key_package(&swapped, &public).is_err());
-
-        let mut substituted = configured.clone();
-        substituted
-            .unknowns
-            .insert(roster_keys[0].clone(), foreign_share);
-        assert!(validate_public_key_package(&substituted, &public).is_err());
-
-        let mut malformed = configured.clone();
-        malformed
-            .unknowns
-            .insert(roster_keys[0].clone(), vec![0xff; 33]);
-        assert!(validate_public_key_package(&malformed, &public).is_err());
-
-        let mut wrong_max = configured.clone();
-        let configuration = wrong_max
-            .unknowns
-            .iter_mut()
-            .find(|(key, _)| key.type_value == PSBT_IN_FROST_CONFIGURATION)
-            .unwrap()
-            .1;
-        configuration[2..4].copy_from_slice(&4_u16.to_be_bytes());
-        assert!(validate_public_key_package(&wrong_max, &public).is_err());
-
+        let public = DerivedPublic::underived(root.clone());
         let mut rng = StdRng::seed_from_u64(18);
-        let mut mismatched_signer = configured.clone();
+        let mut foreign_signer = configured.clone();
         assert!(commit(
-            &mut mismatched_signer,
+            &mut foreign_signer,
             foreign_keys.values().next().unwrap(),
             &public,
             &mut rng,
         )
         .is_err());
-        assert!(mismatched_signer
-            .unknowns
-            .keys()
-            .all(|key| key.type_value != PSBT_IN_FROST_PARTICIPANT_COMMITMENT));
-
+        let mut swapped_input = input();
+        swapped_input
+            .set_frost_threshold_info(&key, &swapped)
+            .unwrap();
         assert!(commit(
-            &mut swapped,
+            &mut swapped_input,
             keys.values().next().unwrap(),
             &public,
             &mut rng,
         )
         .is_err());
-        assert!(swapped
+        for rejected in [foreign_signer, swapped_input] {
+            assert!(rejected
+                .unknowns
+                .keys()
+                .all(|key| key.type_value != PSBT_IN_FROST_RFC9591_COMMITMENT));
+        }
+        assert!(configured
             .unknowns
             .keys()
-            .all(|key| key.type_value != PSBT_IN_FROST_PARTICIPANT_COMMITMENT));
+            .any(|key| key.type_value == PSBT_IN_FROST_THRESHOLD_INFO));
     }
 
     /// Untweaked root shares combined through `gacc`/`tacc` must equal the
