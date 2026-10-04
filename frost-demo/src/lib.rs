@@ -1,4 +1,5 @@
 pub mod derivation;
+pub mod ecdh;
 pub mod frost_psbt;
 pub mod frost_spdk;
 pub mod protocol;

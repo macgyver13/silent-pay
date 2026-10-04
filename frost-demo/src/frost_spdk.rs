@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, bail, Context, Result};
-use frost::keys::Tweak;
 use frost_secp256k1_tr as frost;
 use k256::elliptic_curve::ff::PrimeField;
 use k256::{FieldBytes, Scalar as KScalar};
@@ -16,6 +15,7 @@ use psbt_v2::{Input, Output, PartialEcdhShareData};
 use rand::{CryptoRng, RngCore};
 use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 
+use crate::ecdh::TweakContext;
 use crate::frost_psbt::{Configuration, FrostInputExt, FrostOutputExt};
 
 /// Construct the base BIP-375 PSBT while the generic upstream builder remains
@@ -195,11 +195,12 @@ pub fn add_ecdh_share(
     aux_rand: [u8; 32],
 ) -> Result<()> {
     validate_key_package(input, key_package, public_key_package)?;
-    let tweaked = key_package.clone().tweak::<&[u8]>(None);
-    let secret = SecretKey::from_slice(&tweaked.signing_share().serialize())
+    // BIP445 model: the share is untweaked; the Taproot tweak is applied at
+    // combination time through `gacc`/`tacc` (see `crate::ecdh`).
+    let secret = SecretKey::from_slice(&key_package.signing_share().serialize())
         .context("convert FROST signing share to secp256k1")?;
     let contributor_pk = PublicKey::from_slice(
-        &tweaked
+        &key_package
             .verifying_share()
             .serialize()
             .context("serialize FROST verifying share")?,
@@ -246,10 +247,9 @@ pub fn finalize_sp_outputs(
         bail!("insufficient selected FROST participants for ECDH aggregation");
     }
 
-    let tweaked_public = public_key_package.clone().tweak::<&[u8]>(None);
     let mut selected = BTreeMap::new();
     for identifier in commitments.keys() {
-        let verifying_share = tweaked_public
+        let verifying_share = public_key_package
             .verifying_shares()
             .get(identifier)
             .ok_or_else(|| anyhow!("selected FROST identifier is not in the public key package"))?;
@@ -297,17 +297,18 @@ pub fn finalize_sp_outputs(
     }
 
     let expected_identifiers: Vec<_> = selected.keys().copied().collect();
-    let output_key = PublicKey::from_slice(
-        &tweaked_public
+    let group_key = PublicKey::from_slice(
+        &public_key_package
             .verifying_key()
             .serialize()
-            .context("serialize tweaked FROST group key")?,
+            .context("serialize FROST group key")?,
     )
-    .context("convert tweaked FROST group key")?;
-    let (output_xonly, output_parity) = output_key.x_only_public_key();
-    let canonical_output_key =
-        PublicKey::from_x_only_public_key(output_xonly, secp256k1::Parity::Even);
-    let input_hash = input_hash(&psbt.inputs[0].outpoint_bytes(), &canonical_output_key)?;
+    .context("convert FROST group key")?;
+    let tweak_context = TweakContext::new(group_key).apply_taproot_tweak()?;
+    let input_hash = input_hash(
+        &psbt.inputs[0].outpoint_bytes(),
+        &tweak_context.output_key(),
+    )?;
     let input_scalar = Scalar::from_be_bytes(input_hash)
         .map_err(|_| anyhow!("BIP-352 input hash is not a valid scalar"))?;
 
@@ -324,11 +325,8 @@ pub fn finalize_sp_outputs(
         if shares.keys().copied().collect::<Vec<_>>() != expected_identifiers {
             bail!("incomplete FROST ECDH signer set for Silent Payment output");
         }
-        let mut aggregate = interpolate_ecdh_shares(shares)?;
-        if output_parity == secp256k1::Parity::Odd {
-            aggregate = aggregate.negate(secp);
-        }
-        let aggregate = aggregate
+        let aggregate = tweak_context
+            .combine_ecdh(scan_key, &lagrange_weighted(shares)?)?
             .mul_tweak(secp, &input_scalar)
             .context("apply BIP-352 input hash to aggregate ECDH share")?;
         let index = output_indices.entry(scan_key.serialize()).or_default();
@@ -403,20 +401,14 @@ pub fn verify_participant_tags(
     Ok(())
 }
 
-fn interpolate_ecdh_shares(shares: &BTreeMap<frost::Identifier, PublicKey>) -> Result<PublicKey> {
-    let secp = Secp256k1::verification_only();
+fn lagrange_weighted(
+    shares: &BTreeMap<frost::Identifier, PublicKey>,
+) -> Result<Vec<(Scalar, PublicKey)>> {
     let identifiers: Vec<_> = shares.keys().copied().collect();
-    let mut weighted = Vec::with_capacity(shares.len());
-    for (identifier, share) in shares {
-        let coefficient = lagrange_coefficient(*identifier, &identifiers)?;
-        weighted.push(
-            share
-                .mul_tweak(&secp, &coefficient)
-                .context("weight FROST ECDH share")?,
-        );
-    }
-    PublicKey::combine_keys(&weighted.iter().collect::<Vec<_>>())
-        .context("combine weighted FROST ECDH shares")
+    shares
+        .iter()
+        .map(|(identifier, share)| Ok((lagrange_coefficient(*identifier, &identifiers)?, *share)))
+        .collect()
 }
 
 fn lagrange_coefficient(
@@ -764,5 +756,67 @@ mod tests {
             .unknowns
             .keys()
             .all(|key| key.type_value != PSBT_IN_FROST_PARTICIPANT_COMMITMENT));
+    }
+
+    /// Untweaked shares combined through `gacc`/`tacc` must equal the
+    /// recipient-side ECDH with the Taproot output key, for every subset and
+    /// for both internal-key and output-key parities.
+    #[test]
+    fn untweaked_shares_combine_to_output_key_ecdh() {
+        let secp = Secp256k1::new();
+        let scan_secret = SecretKey::from_slice(&[0x11; 32]).unwrap();
+        let scan_key = PublicKey::from_secret_key(&secp, &scan_secret);
+        let mut parities = std::collections::BTreeSet::new();
+        for seed in 0..32 {
+            let (keys, public) = packages_with_seed(seed);
+            let group_key =
+                PublicKey::from_slice(&public.verifying_key().serialize().unwrap()).unwrap();
+            let zf_output = PublicKey::from_slice(
+                &public
+                    .clone()
+                    .tweak::<&[u8]>(None)
+                    .verifying_key()
+                    .serialize()
+                    .unwrap(),
+            )
+            .unwrap();
+            parities.insert((
+                group_key.x_only_public_key().1,
+                zf_output.x_only_public_key().1,
+            ));
+
+            let context = TweakContext::new(group_key).apply_taproot_tweak().unwrap();
+            let output_key = PublicKey::from_x_only_public_key(
+                zf_output.x_only_public_key().0,
+                secp256k1::Parity::Even,
+            );
+            assert_eq!(context.output_key(), output_key);
+            let expected = output_key
+                .mul_tweak(&secp, &Scalar::from(scan_secret))
+                .unwrap();
+
+            let keys: Vec<_> = keys.values().collect();
+            for pair in [[0, 1], [0, 2], [1, 2]] {
+                let shares = pair
+                    .iter()
+                    .map(|&index| {
+                        let secret =
+                            SecretKey::from_slice(&keys[index].signing_share().serialize())
+                                .unwrap();
+                        let share = scan_key.mul_tweak(&secp, &Scalar::from(secret)).unwrap();
+                        (*keys[index].identifier(), share)
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let combined = context
+                    .combine_ecdh(&scan_key, &lagrange_weighted(&shares).unwrap())
+                    .unwrap();
+                assert_eq!(combined, expected, "seed {seed}, pair {pair:?}");
+            }
+        }
+        assert_eq!(
+            parities.len(),
+            4,
+            "seeds must cover every parity combination"
+        );
     }
 }
