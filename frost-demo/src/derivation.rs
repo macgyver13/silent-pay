@@ -13,45 +13,52 @@ pub const ROOT_CHAIN_CODE: [u8; 32] = [
     0x2d, 0x32, 0xcb, 0x45, 0x71, 0x71, 0x67, 0xe3, 0x00, 0x62, 0x2c, 0x71, 0x67, 0xe3, 0x89, 0x65,
 ];
 
-pub fn derive_public(
-    package: &frost::keys::PublicKeyPackage,
-    path: &[u32],
-) -> Result<(frost::keys::PublicKeyPackage, [u8; 32])> {
-    let mut package = package.clone();
-    let mut chain_code = ROOT_CHAIN_CODE;
-    for child in path {
-        if child & (1 << 31) != 0 {
-            bail!("hardened FROST child derivation is not supported");
-        }
-        let (tweak, next_chain_code) = child_tweak(&package, chain_code, *child)?;
-        package = tweak_public(&package, tweak)?;
-        chain_code = next_chain_code;
-    }
-    Ok((package, chain_code))
+/// One wallet address derived from a root FROST threshold key.
+///
+/// `root` and `tweaks` are the BIP445 view: untweaked shares plus the plain
+/// BIP32 tweaks applied to the threshold public key. `derived` folds those
+/// tweaks into every share, which is what frost-secp256k1-tr signs with.
+#[derive(Clone)]
+pub struct DerivedPublic {
+    pub root: frost::keys::PublicKeyPackage,
+    pub tweaks: Vec<[u8; 32]>,
+    pub derived: frost::keys::PublicKeyPackage,
 }
 
-pub fn derive_key(
-    key: &frost::keys::KeyPackage,
-    public: &frost::keys::PublicKeyPackage,
-    path: &[u32],
-) -> Result<(
-    frost::keys::KeyPackage,
-    frost::keys::PublicKeyPackage,
-    [u8; 32],
-)> {
-    let mut key = key.clone();
-    let mut public = public.clone();
+impl DerivedPublic {
+    /// The root key itself, with no derivation.
+    pub fn underived(root: frost::keys::PublicKeyPackage) -> Self {
+        Self {
+            derived: root.clone(),
+            root,
+            tweaks: Vec::new(),
+        }
+    }
+
+    /// Fold the tweaks into a root key package for frost-secp256k1-tr signing.
+    pub fn key(&self, root_key: &frost::keys::KeyPackage) -> Result<frost::keys::KeyPackage> {
+        tweak_key(root_key, &self.derived, &self.tweaks)
+    }
+}
+
+pub fn derive_public(root: &frost::keys::PublicKeyPackage, path: &[u32]) -> Result<DerivedPublic> {
+    let mut derived = root.clone();
+    let mut tweaks = Vec::with_capacity(path.len());
     let mut chain_code = ROOT_CHAIN_CODE;
     for child in path {
         if child & (1 << 31) != 0 {
             bail!("hardened FROST child derivation is not supported");
         }
-        let (tweak, next_chain_code) = child_tweak(&public, chain_code, *child)?;
-        public = tweak_public(&public, tweak)?;
-        key = tweak_key(&key, &public, tweak)?;
+        let (tweak, next_chain_code) = child_tweak(&derived, chain_code, *child)?;
+        derived = tweak_public(&derived, tweak)?;
+        tweaks.push(tweak);
         chain_code = next_chain_code;
     }
-    Ok((key, public, chain_code))
+    Ok(DerivedPublic {
+        root: root.clone(),
+        tweaks,
+        derived,
+    })
 }
 
 fn child_tweak(
@@ -110,11 +117,14 @@ fn tweak_public(
 fn tweak_key(
     key: &frost::keys::KeyPackage,
     derived_public: &frost::keys::PublicKeyPackage,
-    tweak: [u8; 32],
+    tweaks: &[[u8; 32]],
 ) -> Result<frost::keys::KeyPackage> {
-    let signing = SecretKey::from_slice(&key.signing_share().serialize())?.add_tweak(
-        &Scalar::from_be_bytes(tweak).map_err(|_| anyhow::anyhow!("invalid child tweak"))?,
-    )?;
+    let mut signing = SecretKey::from_slice(&key.signing_share().serialize())?;
+    for tweak in tweaks {
+        signing = signing.add_tweak(
+            &Scalar::from_be_bytes(*tweak).map_err(|_| anyhow::anyhow!("invalid child tweak"))?,
+        )?;
+    }
     let signing_share = frost::keys::SigningShare::deserialize(&signing.secret_bytes())?;
     let verifying_share = *derived_public
         .verifying_shares()
@@ -166,12 +176,17 @@ mod tests {
             xpub.ckd_pub(&secp, ChildNumber::from_normal_idx(*index).unwrap())
                 .unwrap()
         });
-        let (actual, chain_code) = derive_public(&public, &path).unwrap();
+        let actual = derive_public(&public, &path).unwrap();
         assert_eq!(
-            actual.verifying_key().serialize().unwrap(),
+            actual.derived.verifying_key().serialize().unwrap(),
             expected.public_key.serialize()
         );
-        assert_eq!(chain_code, expected.chain_code.to_bytes());
+        // The plain tweaks alone carry the root key to the child key.
+        let tweaked = actual.tweaks.iter().fold(root_key, |key, tweak| {
+            key.add_exp_tweak(&secp, &Scalar::from_be_bytes(*tweak).unwrap())
+                .unwrap()
+        });
+        assert_eq!(tweaked, expected.public_key);
     }
 
     #[test]
@@ -183,14 +198,16 @@ mod tests {
         for share in shares.into_values() {
             let key: frost::keys::KeyPackage = share.try_into().unwrap();
             for path in [[0, 3], [1, 8]] {
-                let (derived_key, derived_public, _) = derive_key(&key, &public, &path).unwrap();
+                let derived = derive_public(&public, &path).unwrap();
+                let derived_key = derived.key(&key).unwrap();
                 assert_eq!(
-                    derived_public
+                    derived
+                        .derived
                         .verifying_shares()
                         .get(derived_key.identifier()),
                     Some(derived_key.verifying_share())
                 );
-                assert_eq!(derived_public.verifying_key(), derived_key.verifying_key());
+                assert_eq!(derived.derived.verifying_key(), derived_key.verifying_key());
             }
         }
     }

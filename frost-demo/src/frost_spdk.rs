@@ -15,6 +15,7 @@ use psbt_v2::{Input, Output, PartialEcdhShareData};
 use rand::{CryptoRng, RngCore};
 use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 
+use crate::derivation::DerivedPublic;
 use crate::ecdh::TweakContext;
 use crate::frost_psbt::{Configuration, FrostInputExt, FrostOutputExt};
 
@@ -189,18 +190,25 @@ pub fn aggregate(
 pub fn add_ecdh_share(
     secp: &Secp256k1<secp256k1::All>,
     input: &mut Input,
-    key_package: &frost::keys::KeyPackage,
-    public_key_package: &frost::keys::PublicKeyPackage,
+    root_key: &frost::keys::KeyPackage,
+    public: &DerivedPublic,
     scan_key: &PublicKey,
     aux_rand: [u8; 32],
 ) -> Result<()> {
-    validate_key_package(input, key_package, public_key_package)?;
-    // BIP445 model: the share is untweaked; the Taproot tweak is applied at
-    // combination time through `gacc`/`tacc` (see `crate::ecdh`).
-    let secret = SecretKey::from_slice(&key_package.signing_share().serialize())
+    validate_public_key_package(input, &public.derived)?;
+    if root_key.verifying_key() != public.root.verifying_key()
+        || public.root.verifying_shares().get(root_key.identifier())
+            != Some(root_key.verifying_share())
+    {
+        bail!("FROST key package does not match the root threshold key");
+    }
+    // BIP445 model: the root share is untweaked; derivation and Taproot
+    // tweaks are applied at combination time through `gacc`/`tacc` (see
+    // `crate::ecdh`).
+    let secret = SecretKey::from_slice(&root_key.signing_share().serialize())
         .context("convert FROST signing share to secp256k1")?;
     let contributor_pk = PublicKey::from_slice(
-        &key_package
+        &root_key
             .verifying_share()
             .serialize()
             .context("serialize FROST verifying share")?,
@@ -233,12 +241,12 @@ pub fn add_ecdh_share(
 pub fn finalize_sp_outputs(
     secp: &Secp256k1<secp256k1::All>,
     psbt: &mut Psbt,
-    public_key_package: &frost::keys::PublicKeyPackage,
+    public: &DerivedPublic,
 ) -> Result<()> {
     if psbt.inputs.len() != 1 {
         bail!("frost-signer currently requires exactly one eligible input");
     }
-    validate_public_key_package(&psbt.inputs[0], public_key_package)?;
+    validate_public_key_package(&psbt.inputs[0], &public.derived)?;
     let commitments = parse_commitments(&psbt.inputs[0])?;
     let configuration = psbt.inputs[0]
         .frost_configuration()?
@@ -249,7 +257,8 @@ pub fn finalize_sp_outputs(
 
     let mut selected = BTreeMap::new();
     for identifier in commitments.keys() {
-        let verifying_share = public_key_package
+        let verifying_share = public
+            .root
             .verifying_shares()
             .get(identifier)
             .ok_or_else(|| anyhow!("selected FROST identifier is not in the public key package"))?;
@@ -297,14 +306,7 @@ pub fn finalize_sp_outputs(
     }
 
     let expected_identifiers: Vec<_> = selected.keys().copied().collect();
-    let group_key = PublicKey::from_slice(
-        &public_key_package
-            .verifying_key()
-            .serialize()
-            .context("serialize FROST group key")?,
-    )
-    .context("convert FROST group key")?;
-    let tweak_context = TweakContext::new(group_key).apply_taproot_tweak()?;
+    let tweak_context = tweak_context(public)?;
     let input_hash = input_hash(
         &psbt.inputs[0].outpoint_bytes(),
         &tweak_context.output_key(),
@@ -345,7 +347,7 @@ pub fn finalize_sp_outputs(
 pub fn verify_sp_outputs(
     secp: &Secp256k1<secp256k1::All>,
     psbt: &Psbt,
-    public_key_package: &frost::keys::PublicKeyPackage,
+    public: &DerivedPublic,
 ) -> Result<()> {
     let expected: Vec<_> = psbt
         .outputs
@@ -353,7 +355,7 @@ pub fn verify_sp_outputs(
         .map(|output| output.script_pubkey.clone())
         .collect();
     let mut derived = psbt.clone();
-    finalize_sp_outputs(secp, &mut derived, public_key_package)?;
+    finalize_sp_outputs(secp, &mut derived, public)?;
     for (index, (expected, actual)) in expected
         .iter()
         .zip(derived.outputs.iter().map(|output| &output.script_pubkey))
@@ -399,6 +401,24 @@ pub fn verify_participant_tags(
         }
     }
     Ok(())
+}
+
+/// BIP445 tweak context for the address: root threshold key, then the plain
+/// derivation tweaks, then the key-path-only Taproot tweak.
+fn tweak_context(public: &DerivedPublic) -> Result<TweakContext> {
+    let root_key = PublicKey::from_slice(
+        &public
+            .root
+            .verifying_key()
+            .serialize()
+            .context("serialize FROST root group key")?,
+    )
+    .context("convert FROST root group key")?;
+    let mut context = TweakContext::new(root_key);
+    for tweak in &public.tweaks {
+        context = context.apply_tweak(*tweak, false)?;
+    }
+    context.apply_taproot_tweak()
 }
 
 fn lagrange_weighted(
@@ -570,6 +590,7 @@ fn validate_public_key_package(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::derivation::derive_public;
     use crate::frost_psbt::{
         PSBT_IN_FROST_CONFIGURATION, PSBT_IN_FROST_PARTICIPANT_COMMITMENT,
         PSBT_IN_FROST_VERIFYING_SHARE,
@@ -758,21 +779,27 @@ mod tests {
             .all(|key| key.type_value != PSBT_IN_FROST_PARTICIPANT_COMMITMENT));
     }
 
-    /// Untweaked shares combined through `gacc`/`tacc` must equal the
-    /// recipient-side ECDH with the Taproot output key, for every subset and
-    /// for both internal-key and output-key parities.
+    /// Untweaked root shares combined through `gacc`/`tacc` must equal the
+    /// recipient-side ECDH with the derived Taproot output key, for every
+    /// subset, with and without derivation, and for both internal-key and
+    /// output-key parities.
     #[test]
     fn untweaked_shares_combine_to_output_key_ecdh() {
         let secp = Secp256k1::new();
         let scan_secret = SecretKey::from_slice(&[0x11; 32]).unwrap();
         let scan_key = PublicKey::from_secret_key(&secp, &scan_secret);
         let mut parities = std::collections::BTreeSet::new();
-        for seed in 0..32 {
-            let (keys, public) = packages_with_seed(seed);
-            let group_key =
-                PublicKey::from_slice(&public.verifying_key().serialize().unwrap()).unwrap();
+        for (seed, path) in
+            (0..16).flat_map(|seed| [&[][..], &[0, 7][..], &[1, 3][..]].map(|path| (seed, path)))
+        {
+            let (keys, root) = packages_with_seed(seed);
+            let public = derive_public(&root, path).unwrap();
+            let internal_key =
+                PublicKey::from_slice(&public.derived.verifying_key().serialize().unwrap())
+                    .unwrap();
             let zf_output = PublicKey::from_slice(
                 &public
+                    .derived
                     .clone()
                     .tweak::<&[u8]>(None)
                     .verifying_key()
@@ -781,11 +808,11 @@ mod tests {
             )
             .unwrap();
             parities.insert((
-                group_key.x_only_public_key().1,
+                internal_key.x_only_public_key().1,
                 zf_output.x_only_public_key().1,
             ));
 
-            let context = TweakContext::new(group_key).apply_taproot_tweak().unwrap();
+            let context = tweak_context(&public).unwrap();
             let output_key = PublicKey::from_x_only_public_key(
                 zf_output.x_only_public_key().0,
                 secp256k1::Parity::Even,
@@ -810,7 +837,10 @@ mod tests {
                 let combined = context
                     .combine_ecdh(&scan_key, &lagrange_weighted(&shares).unwrap())
                     .unwrap();
-                assert_eq!(combined, expected, "seed {seed}, pair {pair:?}");
+                assert_eq!(
+                    combined, expected,
+                    "seed {seed}, path {path:?}, pair {pair:?}"
+                );
             }
         }
         assert_eq!(

@@ -9,7 +9,7 @@ use rand::{CryptoRng, RngCore};
 use secp256k1::{PublicKey, Secp256k1};
 use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 
-use crate::derivation::{derive_key, derive_public};
+use crate::derivation::{derive_public, DerivedPublic};
 use crate::frost_psbt::FrostInputExt;
 use crate::frost_spdk::Round1Secret;
 use crate::wallet::{PublicWalletFile, ShareFile};
@@ -19,7 +19,7 @@ pub struct PendingRoundOne {
     initial: Psbt,
     secret: Round1Secret,
     key: frost::keys::KeyPackage,
-    public: frost::keys::PublicKeyPackage,
+    public: DerivedPublic,
     recipients: Vec<SilentPaymentAddress>,
 }
 
@@ -76,22 +76,27 @@ impl Companion {
         }
         let (root_key, root_public) = self.share.packages()?;
         let path = discover_child_path(initial, &root_public, &self.share.root_fingerprint)?;
-        let (key, public, _) = derive_key(&root_key, &root_public, &path)?;
+        let public = derive_public(&root_public, &path)?;
         validate_wallet_binding(
             initial,
             &root_public,
-            &public,
+            &public.derived,
             &self.share.root_fingerprint,
             &path,
         )?;
         let recipients = recipients(initial)?;
         let mut contribution = initial.clone();
-        let secret =
-            workflow::contribute(&Secp256k1::new(), &mut contribution, &key, &public, rng)?;
+        let secret = workflow::contribute(
+            &Secp256k1::new(),
+            &mut contribution,
+            &root_key,
+            &public,
+            rng,
+        )?;
         self.pending = Some(PendingRoundOne {
             initial: initial.clone(),
             secret,
-            key,
+            key: root_key,
             public,
             recipients,
         });
@@ -111,7 +116,8 @@ impl Companion {
             }
             let mut contribution = signing.clone();
             let sighash = workflow::compute_sighash(&contribution)?;
-            let package = workflow::signing_package(&contribution, &sighash, &pending.public)?;
+            let package =
+                workflow::signing_package(&contribution, &sighash, &pending.public.derived)?;
             workflow::partial_sign(
                 &Secp256k1::new(),
                 &mut contribution,
@@ -136,8 +142,8 @@ pub fn create_initial(
 ) -> Result<Psbt> {
     let root = wallet.package()?;
     let path = [0, receive_index];
-    let (derived, _) = derive_public(&root, &path)?;
-    let (change_public, _) = derive_public(&root, &[1, receive_index])?;
+    let derived = derive_public(&root, &path)?.derived;
+    let change_public = derive_public(&root, &[1, receive_index])?.derived;
     let setup = workflow::setup_public(derived)?;
     let change_setup = workflow::setup_public(change_public)?;
     let mut psbt = workflow::construct_psbt(&setup, &[(setup.sp_address, amount)])?;
@@ -212,19 +218,16 @@ pub fn collect_round_two(signing: &Psbt, contributions: &[Psbt]) -> Result<Psbt>
 pub fn finalize(wallet: &PublicWalletFile, psbt: &mut Psbt) -> Result<Transaction> {
     let public = authenticated_public(wallet, psbt)?;
     let sighash = workflow::compute_sighash(psbt)?;
-    let package = workflow::signing_package(psbt, &sighash, &public)?;
-    workflow::aggregate_and_extract(psbt, &package, &public)
+    let package = workflow::signing_package(psbt, &sighash, &public.derived)?;
+    workflow::aggregate_and_extract(psbt, &package, &public.derived)
 }
 
-fn authenticated_public(
-    wallet: &PublicWalletFile,
-    psbt: &Psbt,
-) -> Result<frost::keys::PublicKeyPackage> {
+fn authenticated_public(wallet: &PublicWalletFile, psbt: &Psbt) -> Result<DerivedPublic> {
     let root = wallet.package()?;
     let path = discover_child_path(psbt, &root, &wallet.root_fingerprint)?;
-    let (expected, _) = derive_public(&root, &path)?;
+    let expected = derive_public(&root, &path)?;
     let encoded = public_from_psbt(psbt)?;
-    if encoded != expected {
+    if encoded != expected.derived {
         bail!("PSBT FROST roster does not match the authenticated coordinator wallet");
     }
     Ok(expected)
@@ -279,7 +282,7 @@ fn discover_child_path(
             }
             _ => continue,
         };
-        let (derived, _) = derive_public(root_public, &path)?;
+        let derived = derive_public(root_public, &path)?.derived;
         let setup = workflow::setup_public(derived)?;
         if setup.internal_key == *internal_key && setup.p2tr_script == witness.script_pubkey {
             matches.push(path);
@@ -334,7 +337,7 @@ fn validate_wallet_binding(
     if witness.script_pubkey != setup.p2tr_script {
         bail!("witness_utxo does not pay the derived FROST key");
     }
-    let (change_public, _) = derive_public(root_public, &[1, path[1]])?;
+    let change_public = derive_public(root_public, &[1, path[1]])?.derived;
     let change_setup = workflow::setup_public(change_public)?;
     let change = psbt
         .outputs
@@ -426,6 +429,7 @@ fn validate_session_intent(initial: &Psbt, signing: &Psbt) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frost_spdk;
     use crate::wallet;
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -469,6 +473,46 @@ mod tests {
                     &setup.output_key,
                 )
                 .unwrap();
+
+            // Recipient side: scan with b_scan against the spent output key.
+            // Coordinator and companions share the ECDH code, so only this
+            // independent check catches a combination that is wrong for both.
+            let secp = Secp256k1::new();
+            let scan_secret = secp256k1::SecretKey::from_slice(&[0x11; 32]).unwrap();
+            let spend_key = secp256k1::PublicKey::from_secret_key(
+                &secp,
+                &secp256k1::SecretKey::from_slice(&[0x22; 32]).unwrap(),
+            );
+            let input_key = secp256k1::PublicKey::from_x_only_public_key(
+                setup.output_key,
+                secp256k1::Parity::Even,
+            );
+            let input_hash =
+                frost_spdk::input_hash(&signed.inputs[0].outpoint_bytes(), &input_key).unwrap();
+            let shared = input_key
+                .mul_tweak(&secp, &secp256k1::Scalar::from(scan_secret))
+                .unwrap()
+                .mul_tweak(
+                    &secp,
+                    &secp256k1::Scalar::from_be_bytes(input_hash).unwrap(),
+                )
+                .unwrap();
+            let expected =
+                frost_spdk::derive_silent_payment_output(&secp, &spend_key, &shared, 0).unwrap();
+            let sp_index = signed
+                .outputs
+                .iter()
+                .position(|output| output.sp_v0_info.is_some())
+                .unwrap();
+            assert_eq!(
+                transaction.output[sp_index].script_pubkey,
+                bitcoin::ScriptBuf::new_p2tr_tweaked(
+                    bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(
+                        expected.x_only_public_key().0
+                    )
+                ),
+                "recipient cannot find the payment for subset {subset:?}"
+            );
         }
         std::fs::remove_dir_all(directory).unwrap();
     }

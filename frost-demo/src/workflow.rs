@@ -19,6 +19,7 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use silentpayments::{Network as SpNetwork, SilentPaymentAddress, SpVersion};
 
+use crate::derivation::DerivedPublic;
 use crate::frost_psbt::FrostOutputExt;
 use crate::frost_spdk::{self, Round1Secret};
 
@@ -210,8 +211,8 @@ pub fn construct_psbt(
 pub fn contribute<R: RngCore + rand::CryptoRng>(
     secp: &Secp256k1<secp256k1::All>,
     psbt: &mut Psbt,
-    key_package: &frost::keys::KeyPackage,
-    public_key_package: &frost::keys::PublicKeyPackage,
+    root_key: &frost::keys::KeyPackage,
+    public: &DerivedPublic,
     rng: &mut R,
 ) -> Result<Round1Secret> {
     let scan_keys: Vec<_> = psbt
@@ -230,21 +231,26 @@ pub fn contribute<R: RngCore + rand::CryptoRng>(
         frost_spdk::add_ecdh_share(
             secp,
             &mut psbt.inputs[0],
-            key_package,
-            public_key_package,
+            root_key,
+            public,
             &scan_key,
             aux_rand,
         )?;
     }
-    frost_spdk::commit(&mut psbt.inputs[0], key_package, public_key_package, rng)
+    frost_spdk::commit(
+        &mut psbt.inputs[0],
+        &public.key(root_key)?,
+        &public.derived,
+        rng,
+    )
 }
 
 pub fn derive_sp_outputs(
     secp: &Secp256k1<secp256k1::All>,
     psbt: &mut Psbt,
-    public_key_package: &frost::keys::PublicKeyPackage,
+    public: &DerivedPublic,
 ) -> Result<()> {
-    frost_spdk::finalize_sp_outputs(secp, psbt, public_key_package)
+    frost_spdk::finalize_sp_outputs(secp, psbt, public)
 }
 
 pub fn compute_sighash(psbt: &Psbt) -> Result<[u8; 32]> {
@@ -268,13 +274,13 @@ pub fn partial_sign(
     psbt: &mut Psbt,
     signing_package: &frost::SigningPackage,
     secret: Round1Secret,
-    key_package: &frost::keys::KeyPackage,
-    public_key_package: &frost::keys::PublicKeyPackage,
+    root_key: &frost::keys::KeyPackage,
+    public: &DerivedPublic,
     expected_recipients: &[SilentPaymentAddress],
 ) -> Result<()> {
     verify_recipients(psbt, expected_recipients)?;
-    frost_spdk::verify_sp_outputs(secp, psbt, public_key_package)?;
-    frost_spdk::verify_participant_tags(psbt, public_key_package)?;
+    frost_spdk::verify_sp_outputs(secp, psbt, public)?;
+    frost_spdk::verify_participant_tags(psbt, &public.derived)?;
     let expected = compute_sighash(psbt)?;
     if signing_package.message() != expected.as_slice() {
         return Err(anyhow!(
@@ -285,8 +291,8 @@ pub fn partial_sign(
         &mut psbt.inputs[0],
         signing_package,
         secret,
-        key_package,
-        public_key_package,
+        &public.key(root_key)?,
+        &public.derived,
     )
 }
 
@@ -383,6 +389,11 @@ mod tests {
     use crate::frost_psbt::{FrostInputExt, FrostOutputExt};
     use secp256k1::Scalar;
 
+    /// The in-process fixtures sign with the root key directly (no path).
+    fn underived(keys: &KeySetup) -> DerivedPublic {
+        DerivedPublic::underived(keys.public_key_package.clone())
+    }
+
     #[test]
     fn uses_static_party_identifiers() {
         let keys = setup_keys().unwrap();
@@ -402,12 +413,10 @@ mod tests {
         let mut rng = StdRng::from_seed([0x42; 32]);
         let secrets: Vec<_> = selected
             .iter()
-            .map(|key| {
-                contribute(&secp, &mut psbt, key, &keys.public_key_package, &mut rng).unwrap()
-            })
+            .map(|key| contribute(&secp, &mut psbt, key, &underived(&keys), &mut rng).unwrap())
             .collect();
 
-        derive_sp_outputs(&secp, &mut psbt, &keys.public_key_package).unwrap();
+        derive_sp_outputs(&secp, &mut psbt, &underived(&keys)).unwrap();
         assert!(psbt
             .outputs
             .iter()
@@ -424,7 +433,7 @@ mod tests {
                 &package,
                 secret,
                 key,
-                &keys.public_key_package,
+                &underived(&keys),
                 &[keys.sp_address],
             )
             .unwrap();
@@ -460,21 +469,15 @@ mod tests {
         let mut secrets = Vec::new();
         for key in &selected {
             let mut device_psbt = Psbt::deserialize(&bytes).unwrap();
-            let secret = contribute(
-                &secp,
-                &mut device_psbt,
-                key,
-                &keys.public_key_package,
-                &mut rng,
-            )
-            .unwrap();
+            let secret =
+                contribute(&secp, &mut device_psbt, key, &underived(&keys), &mut rng).unwrap();
             secrets.push(secret);
             bytes = device_psbt.serialize();
         }
 
         // Coordinator loads the round-one bytes and derives the SP outputs.
         let mut coordinator_psbt = Psbt::deserialize(&bytes).unwrap();
-        derive_sp_outputs(&secp, &mut coordinator_psbt, &keys.public_key_package).unwrap();
+        derive_sp_outputs(&secp, &mut coordinator_psbt, &underived(&keys)).unwrap();
         bytes = coordinator_psbt.serialize();
 
         // Each device loads the derived bytes, independently reconstructs the
@@ -491,7 +494,7 @@ mod tests {
                 &package,
                 secret,
                 key,
-                &keys.public_key_package,
+                &underived(&keys),
                 &[keys.sp_address],
             )
             .unwrap();
@@ -528,11 +531,9 @@ mod tests {
         let mut rng = StdRng::from_seed([0x43; 32]);
         let mut secrets: Vec<_> = selected
             .iter()
-            .map(|key| {
-                contribute(&secp, &mut psbt, key, &keys.public_key_package, &mut rng).unwrap()
-            })
+            .map(|key| contribute(&secp, &mut psbt, key, &underived(&keys), &mut rng).unwrap())
             .collect();
-        derive_sp_outputs(&secp, &mut psbt, &keys.public_key_package).unwrap();
+        derive_sp_outputs(&secp, &mut psbt, &underived(&keys)).unwrap();
         let message = compute_sighash(&psbt).unwrap();
         let package = signing_package(&psbt, &message, &keys.public_key_package).unwrap();
         let sp_output = psbt
@@ -549,7 +550,7 @@ mod tests {
             &package,
             secrets.remove(0),
             selected[0],
-            &keys.public_key_package,
+            &underived(&keys),
             &[keys.sp_address],
         )
         .is_err());
@@ -565,11 +566,9 @@ mod tests {
         let mut rng = StdRng::from_seed([0x45; 32]);
         let mut secrets: Vec<_> = selected
             .iter()
-            .map(|key| {
-                contribute(&secp, &mut psbt, key, &keys.public_key_package, &mut rng).unwrap()
-            })
+            .map(|key| contribute(&secp, &mut psbt, key, &underived(&keys), &mut rng).unwrap())
             .collect();
-        derive_sp_outputs(&secp, &mut psbt, &keys.public_key_package).unwrap();
+        derive_sp_outputs(&secp, &mut psbt, &underived(&keys)).unwrap();
         // A coordinator that binds the FROST session to a different message than
         // the PSBT sighash must be rejected before any share is produced.
         let package = signing_package(&psbt, &[0xab; 32], &keys.public_key_package).unwrap();
@@ -579,7 +578,7 @@ mod tests {
             &package,
             secrets.remove(0),
             selected[0],
-            &keys.public_key_package,
+            &underived(&keys),
             &[keys.sp_address],
         )
         .is_err());
@@ -606,11 +605,9 @@ mod tests {
         let mut rng = StdRng::from_seed([0x46; 32]);
         let mut secrets: Vec<_> = selected
             .iter()
-            .map(|key| {
-                contribute(&secp, &mut psbt, key, &keys.public_key_package, &mut rng).unwrap()
-            })
+            .map(|key| contribute(&secp, &mut psbt, key, &underived(&keys), &mut rng).unwrap())
             .collect();
-        derive_sp_outputs(&secp, &mut psbt, &keys.public_key_package).unwrap();
+        derive_sp_outputs(&secp, &mut psbt, &underived(&keys)).unwrap();
         let message = compute_sighash(&psbt).unwrap();
         let package = signing_package(&psbt, &message, &keys.public_key_package).unwrap();
         assert!(partial_sign(
@@ -619,7 +616,7 @@ mod tests {
             &package,
             secrets.remove(0),
             selected[0],
-            &keys.public_key_package,
+            &underived(&keys),
             &[keys.sp_address],
         )
         .is_err());
@@ -634,9 +631,9 @@ mod tests {
         let selected: Vec<_> = keys.key_packages.values().take(2).collect();
         let mut rng = StdRng::from_seed([0x47; 32]);
         for key in &selected {
-            contribute(&secp, &mut psbt, key, &keys.public_key_package, &mut rng).unwrap();
+            contribute(&secp, &mut psbt, key, &underived(&keys), &mut rng).unwrap();
         }
-        derive_sp_outputs(&secp, &mut psbt, &keys.public_key_package).unwrap();
+        derive_sp_outputs(&secp, &mut psbt, &underived(&keys)).unwrap();
         let derived = psbt
             .outputs
             .iter()
@@ -692,7 +689,7 @@ mod tests {
             &Secp256k1::new(),
             &mut psbt,
             keys.key_packages.values().next().unwrap(),
-            &keys.public_key_package,
+            &underived(&keys),
             &mut rng,
         )
         .unwrap();
