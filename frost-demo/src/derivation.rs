@@ -6,7 +6,12 @@ use hmac::{Hmac, Mac};
 use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 use sha2::Sha512;
 
-pub const ROOT_CHAIN_CODE: [u8; 32] = [0; 32];
+/// BIP328 synthetic xpub chain code, SHA256("MuSig2MuSig2MuSig2"). Applied to
+/// the FROST threshold public key so FROST and MuSig2 wallets derive alike.
+pub const ROOT_CHAIN_CODE: [u8; 32] = [
+    0x86, 0x80, 0x87, 0xca, 0x02, 0xa6, 0xf9, 0x74, 0xc4, 0x59, 0x89, 0x24, 0xc3, 0x6b, 0x57, 0x76,
+    0x2d, 0x32, 0xcb, 0x45, 0x71, 0x71, 0x67, 0xe3, 0x00, 0x62, 0x2c, 0x71, 0x67, 0xe3, 0x89, 0x65,
+];
 
 pub fn derive_public(
     package: &frost::keys::PublicKeyPackage,
@@ -132,7 +137,16 @@ mod tests {
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
-    fn zero_chain_code_matches_ckdpub() {
+    fn root_chain_code_is_bip328_constant() {
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            ROOT_CHAIN_CODE,
+            <[u8; 32]>::from(Sha256::digest(b"MuSig2MuSig2MuSig2"))
+        );
+    }
+
+    #[test]
+    fn synthetic_chain_code_matches_ckdpub() {
         let mut rng = StdRng::seed_from_u64(4);
         let (_, public) =
             frost::keys::generate_with_dealer(3, 2, frost::keys::IdentifierList::Default, &mut rng)
