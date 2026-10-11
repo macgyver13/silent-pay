@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
-use psbt::Psbt as SilentPaymentPsbt;
+use psbt_v2::Psbt as SilentPaymentPsbt;
 use secp256k1::{Secp256k1, SecretKey};
-use silentpayments::SilentPaymentAddress;
+use silentpayments::SilentPaymentCode;
 use sp_demo::verify_receipt;
 use std::fs;
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ fn main() -> Result<()> {
     };
     let psbt = SilentPaymentPsbt::deserialize(&psbt_bytes).context("failed to parse PSBT")?;
 
-    let address = SilentPaymentAddress::try_from(args.address.as_str())
+    let address = SilentPaymentCode::try_from(args.address.as_str())
         .map_err(|e| anyhow::anyhow!("invalid --address: {e}"))?;
 
     let scan_bytes =

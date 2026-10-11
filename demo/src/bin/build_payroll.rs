@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use sp_demo::workflow::KeyArch;
 use sp_demo::{build_payroll, BuildPayrollConfig};
 use std::path::PathBuf;
 
@@ -30,6 +31,7 @@ fn main() -> Result<()> {
 fn parse_args() -> Result<BuildPayrollConfig> {
     let mut recipients_path = PathBuf::from("recipients.toml");
     let mut out_dir = PathBuf::from("output");
+    let mut key_arch = KeyArch::AggregateThenDerive;
     let mut args = std::env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -46,6 +48,7 @@ fn parse_args() -> Result<BuildPayrollConfig> {
                         .ok_or_else(|| anyhow::anyhow!("--out-dir requires a path"))?,
                 );
             }
+            "--derive-first" => key_arch = KeyArch::DeriveThenAggregate,
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -57,9 +60,10 @@ fn parse_args() -> Result<BuildPayrollConfig> {
     Ok(BuildPayrollConfig {
         recipients_path,
         out_dir,
+        key_arch,
     })
 }
 
 fn print_usage() {
-    eprintln!("Usage: build_payroll [--recipients recipients.toml] [--out-dir output]");
+    eprintln!("Usage: build_payroll [--recipients recipients.toml] [--out-dir output] [--derive-first]");
 }

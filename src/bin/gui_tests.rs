@@ -3,16 +3,7 @@ use silent_pay::parse_wallet;
 
 const TEST_WALLET_TOML: &str = r#"
 network = "testnet"
-
-[[signers]]
-xfp = "0f056943"
-derivation_path = "m/48h/1h/0h/3h"
-xpub = "tpubDF2rnouQaaYrY6CUWTapYkeFEs3h3qrzL4M52ZGoPeU9dkarJMtrw6VF1zJRGuGuAFxYS3kXtavfAwQPTQkU5dyNYpbgxcpftrR8H3U85Ez"
-
-[[signers]]
-xfp = "6ba6cfd0"
-derivation_path = "m/48h/1h/0h/3h"
-xpub = "tpubDFcrvj5n7gyazzxdg9k6uvzQsoQWow1xbksr7EvKPRBgUbwCdqu2qxyTJjYFNJ7MQLfdXSJV4n8xPZGtrvwQtEbktinC4EP3k8JN2hcBtz4"
+descriptor = "tr(musig([0f056943/48h/1h/0h/3h]tpubDF2rnouQaaYrY6CUWTapYkeFEs3h3qrzL4M52ZGoPeU9dkarJMtrw6VF1zJRGuGuAFxYS3kXtavfAwQPTQkU5dyNYpbgxcpftrR8H3U85Ez,[6ba6cfd0/48h/1h/0h/3h]tpubDFcrvj5n7gyazzxdg9k6uvzQsoQWow1xbksr7EvKPRBgUbwCdqu2qxyTJjYFNJ7MQLfdXSJV4n8xPZGtrvwQtEbktinC4EP3k8JN2hcBtz4)/<0;1>/*)"
 "#;
 
 #[test]
@@ -90,6 +81,18 @@ fn testnet_network_uses_testnet_default_paths() {
     assert_eq!(
         default_path_for_network("testnet", ".", "output/utxos.toml", "utxos.toml"),
         PathBuf::from("./testnet/utxos.toml")
+    );
+}
+
+#[test]
+fn signet_network_uses_signet_default_paths() {
+    assert_eq!(
+        default_path_for_network("signet", "/tmp/silent-pay", "wallet.toml", "wallet.toml"),
+        PathBuf::from("/tmp/silent-pay/signet/wallet.toml")
+    );
+    assert_eq!(
+        default_path_for_network("testnet", "/tmp/silent-pay", "signet/wallet.toml", "wallet.toml"),
+        PathBuf::from("/tmp/silent-pay/testnet/wallet.toml")
     );
 }
 
@@ -534,4 +537,95 @@ fn test_utxo_on_chain(
         status,
         label: None,
     }
+}
+
+// A payroll Build saved and the same PSBT after two Jade emulators signed it on
+// signet: two silent payment recipients plus change.
+const BUILT_PSBT: &[u8] = include_bytes!("../../tests/data/payroll_built_signet.psbt");
+const SIGNED_PSBT: &[u8] = include_bytes!("../../tests/data/payroll_signed_signet.psbt");
+
+fn payroll_psbt(bytes: &[u8]) -> SilentPaymentPsbt {
+    SilentPaymentPsbt::deserialize(bytes).expect("fixture parses")
+}
+
+fn check_fixture(signed: &SilentPaymentPsbt) -> Result<Vec<String>> {
+    check_signed_matches_built(&payroll_psbt(BUILT_PSBT), signed, SpNetwork::Testnet)
+}
+
+fn spent_utxo(status: UtxoStatus) -> UtxoFile {
+    let input = &payroll_psbt(SIGNED_PSBT).inputs[0];
+    UtxoFile {
+        utxos: vec![TreasuryUtxo {
+            txid: input.previous_txid.to_string(),
+            vout: input.spent_output_index,
+            amount_sat: 0,
+            chain: RECEIVE_CHAIN,
+            derivation_index: 0,
+            status,
+            label: None,
+        }],
+    }
+}
+
+#[test]
+fn signed_payroll_matching_build_lists_each_recipient() {
+    let lines = check_fixture(&payroll_psbt(SIGNED_PSBT)).expect("signed matches built");
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with("recipient output 0: "), "{}", lines[0]);
+    assert!(lines[0].contains(" sat to tsp1"), "{}", lines[0]);
+}
+
+#[test]
+fn signed_payroll_with_a_changed_amount_is_rejected() {
+    let mut signed = payroll_psbt(SIGNED_PSBT);
+    signed.outputs[0].amount = signed.outputs[0].amount + Amount::from_sat(1);
+    let error = check_fixture(&signed).expect_err("amount differs");
+    assert!(error.to_string().contains("output 0 pays"), "{error}");
+}
+
+#[test]
+fn signed_payroll_paying_a_different_recipient_is_rejected() {
+    let mut signed = payroll_psbt(SIGNED_PSBT);
+    signed.outputs[0].sp_v0_info = signed.outputs[1].sp_v0_info;
+    let error = check_fixture(&signed).expect_err("recipient differs");
+    assert!(error.to_string().contains("different silent payment recipient"), "{error}");
+}
+
+#[test]
+fn signed_payroll_with_a_changed_change_script_is_rejected() {
+    let mut signed = payroll_psbt(SIGNED_PSBT);
+    let change = signed
+        .outputs
+        .iter()
+        .position(|output| output.sp_v0_info.is_none())
+        .expect("fixture has change");
+    signed.outputs[change].script_pubkey = bitcoin::ScriptBuf::new_op_return([0u8; 4]);
+    let error = check_fixture(&signed).expect_err("change differs");
+    assert!(error.to_string().contains("different script"), "{error}");
+}
+
+#[test]
+fn signed_payroll_with_a_missing_output_is_rejected() {
+    let mut signed = payroll_psbt(SIGNED_PSBT);
+    signed.outputs.pop();
+    assert!(check_fixture(&signed).is_err());
+}
+
+#[test]
+fn signed_payroll_spending_a_different_input_is_rejected() {
+    let mut signed = payroll_psbt(SIGNED_PSBT);
+    signed.inputs[0].spent_output_index += 1;
+    let error = check_fixture(&signed).expect_err("input differs");
+    assert!(error.to_string().contains("different inputs"), "{error}");
+}
+
+#[test]
+fn signed_payroll_must_spend_a_known_utxo() {
+    let signed = payroll_psbt(SIGNED_PSBT);
+    check_spent_utxo_available(&spent_utxo(UtxoStatus::Available), &signed).expect("available");
+    check_spent_utxo_available(&spent_utxo(UtxoStatus::Spent), &signed)
+        .expect("a recorded payroll can be finalized again");
+    let error = check_spent_utxo_available(&UtxoFile { utxos: Vec::new() }, &signed)
+        .expect_err("unknown UTXO");
+    assert!(error.to_string().contains("not a UTXO in utxos.toml"), "{error}");
 }

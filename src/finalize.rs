@@ -11,15 +11,15 @@ use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::{OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-use psbt::roles::{ExtractorPsbtExt, InputWitnessFinalizerPsbtExt};
-use psbt::Psbt as SilentPaymentPsbt;
+use psbt_v2::{Extractor, Finalizer};
+use psbt_v2::Psbt as SilentPaymentPsbt;
 use secp256k1::Secp256k1;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use psbt::musig2::finalize_sp_outputs;
-use psbt::musig2::keyagg::build_tweaked_key_agg_ctx;
-use psbt::roles::musig2_signer::aggregate_musig2_sigs;
+use psbt::musig2::keyagg::{build_tweaked_key_agg_ctx, AggregationMode};
+use psbt::musig2_signer::aggregate_musig2_sigs;
 
 #[derive(Debug, Clone)]
 pub struct FinalizePayrollResult {
@@ -57,18 +57,29 @@ pub fn finalize_payroll(psbt_path: impl AsRef<Path>) -> Result<FinalizePayrollRe
         ));
     }
     let (_agg_pk, participant_pks) = participants.remove(0);
+    // A missing aggregate origin means the aggregate key was built by deriving each
+    // participant first (BIP-390 ranged participants); see rust-psbt's
+    // `musig2_agg_path` doc comment. It must not be defaulted to [0, 0].
     let path = psbt.inputs[0].musig2_agg_path();
-    let (key_agg_ctx, _gacc) = build_tweaked_key_agg_ctx(&secp, &participant_pks, &path)?;
+    let mode = match path.as_deref() {
+        Some(path) => AggregationMode::AggregateThenDerive { path },
+        None => AggregationMode::DeriveThenAggregate,
+    };
+    let agg = build_tweaked_key_agg_ctx(&secp, &participant_pks, mode)?;
+    let key_agg_ctx = agg.ctx;
 
     // Aggregate the partial signatures already present in the PSBT and extract the tx.
     let message = compute_sighash(&psbt)?;
     aggregate_musig2_sigs(&mut psbt.inputs[0], &key_agg_ctx, &message)?;
-    let psbt = psbt
-        .clone()
-        .finalize()
+    let psbt = Finalizer::new(psbt)
+        .map_err(|e| anyhow!("finalizer new: {e:?}"))?
+        .finalize(&secp)
         .map_err(|e| anyhow!("finalize witnesses: {e:?}"))?;
-    let tx = psbt
-        .clone()
+    // finalize_sp_outputs checked the SP output scripts above. The Finalizer then
+    // cleared the MuSig2 partial shares, so spdk's SpExtractorExt cannot recheck
+    // them; extract with rust-psbt's Extractor directly.
+    let tx = Extractor::new(psbt.clone())
+        .map_err(|e| anyhow!("extractor: {e:?}"))?
         .extract_tx()
         .map_err(|e| anyhow!("extract: {e:?}"))?;
     let tx_hex = bitcoin::consensus::encode::serialize_hex(&tx);
